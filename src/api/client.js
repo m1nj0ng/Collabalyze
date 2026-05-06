@@ -20,10 +20,19 @@ client.interceptors.response.use(
 );
 
 // 데이터 요청 함수 예시
-export const fetchProjectStats = async (repoUrl) => {
-  // 실제 백엔드 연동 시: return client.get(`/stats?repo=${repoUrl}`);
-  // 현재는 테스트를 위해 모의 데이터 반환 코드를 주석으로 남기거나 App.jsx에서 처리
-  return client.get('/stats'); 
+// 분석 시작 요청
+export const startAnalysis = async (repoUrl) => {
+  return client.post('/analyze', { repo_url: repoUrl });
+};
+
+// 분석 상태 및 결과 조회
+export const getAnalysisResult = async (analysisId) => {
+  return client.get(`/result/${analysisId}`);
+};
+
+// 특정 사용자 상세 데이터 조회
+export const getUserDetail = async (userId) => {
+  return client.get(`/detail/${userId}`);
 };
 
 export default client;
