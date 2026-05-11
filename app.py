@@ -215,6 +215,39 @@ def github_callback():
     })
 
 # ==========================================
+# 3.5. 특정 유저의 전체 GitHub Repository 목록 조회 API
+# ==========================================
+
+@app.route('/api/users/<int:user_id>/repos', methods=['GET'])
+def get_user_repos(user_id):
+    # 1. DB에서 대상 유저 및 Access Token 검증
+    user = User.query.get(user_id)
+    if not user or not user.access_token:
+        return jsonify({"error": "유저 정보 또는 Access Token을 찾을 수 없습니다."}), 404
+
+    # 2. GitHub API 호출 (사용자 인증 기반)
+    headers = {
+        'Authorization': f'token {user.access_token}',
+        'Accept': 'application/vnd.github.v3+json'
+    }
+    # visibility=all 옵션: Public 및 Private 레포지토리 모두 포함하여 조회
+    response = requests.get('https://api.github.com/user/repos?visibility=all&sort=updated&per_page=100', headers=headers)
+
+    if response.status_code != 200:
+        return jsonify({"error": "GitHub Repository 목록 조회에 실패했습니다."}), response.status_code
+
+    # 3. 프론트엔드 연동을 위한 데이터 파싱 (레포지토리 이름 및 URL)
+    repos = response.json()
+    repo_list = [{"name": repo['full_name'], "url": repo['html_url']} for repo in repos]
+
+    # 4. 최종 JSON 응답 반환
+    return jsonify({
+        "status": "success",
+        "total_count": len(repo_list),
+        "repos": repo_list
+    })
+
+# ==========================================
 # 4. 프로젝트 (Repository) 등록 API 라우터
 # ==========================================
 
