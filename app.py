@@ -207,12 +207,9 @@ def github_callback():
     # 트랜잭션 커밋
     db.session.commit() 
 
-    # 6. 로그인 성공 결과 반환
-    return jsonify({
-        "status": "success", 
-        "message": f"환영합니다, {github_id}님!", 
-        "user_id": user.id
-    })
+    # 6. 인증 완료 후 프론트엔드(Vercel)로 리다이렉트 및 유저 정보 전달
+    vercel_redirect_url = f"https://collabalyze.vercel.app?user_id={user.id}&github_id={github_id}&profile_image={user.profile_image}"
+    return redirect(vercel_redirect_url)
 
 # ==========================================
 # 3.5. 특정 유저의 전체 GitHub Repository 목록 조회 API
