@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { getUserRepos } from '../api/client';
 
 const MainPage = () => {
   const [repoUrl, setRepoUrl] = useState('');
@@ -18,6 +19,44 @@ const MainPage = () => {
   });
   const navigate = useNavigate();
 
+  // 컴포넌트 마운트 시 URL 파라미터 확인 (소셜 로그인 후 복귀 처리)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const userId = params.get("user_id");
+    const githubId = params.get("github_id");
+    const profileImage = params.get("profile_image");
+
+    if (userId) {
+      localStorage.setItem("user_id", userId);
+      if (githubId) localStorage.setItem("github_id", githubId);
+      if (profileImage) localStorage.setItem("profile_image", profileImage);
+      
+      setIsLoggedIn(true);
+      
+      // URL 정리
+      window.history.replaceState({}, document.title, "/");
+      
+      // 로그인 성공 후 레포지토리 목록 가져오기
+      fetchUserRepos(userId);
+    } else if (isLoggedIn) {
+      // 이미 로그인 상태라면 로컬 저장소의 ID로 레포지토리 갱신
+      const savedUserId = localStorage.getItem("user_id");
+      if (savedUserId) fetchUserRepos(savedUserId);
+    }
+  }, []);
+
+  const fetchUserRepos = async (userId) => {
+    try {
+      const response = await getUserRepos(userId);
+      if (response.data.status === 'success') {
+        setUserRepos(response.data.repos);
+      }
+    } catch (error) {
+      console.error("레포지토리 목록을 가져오는데 실패했습니다:", error);
+      if (error.response?.status === 401) handleLogout();
+    }
+  };
+
   // isLoggedIn 상태가 변경될 때마다 localStorage에 저장
   useEffect(() => {
     localStorage.setItem('isLoggedIn', isLoggedIn);
@@ -34,32 +73,15 @@ const MainPage = () => {
   }, [history]);
 
   const handleLogin = () => {
-    setIsLoggedIn(true);
-    // 로그인 성공 시 사용자의 리포지토리 목록을 가져오는 시뮬레이션
-    const mockRepos = [
-      { name: 'my-awesome-project', url: 'https://github.com/user/my-awesome-project' },
-      { name: 'team-collab-dashboard', url: 'https://github.com/user/team-collab-dashboard' },
-      { name: 'react-analysis-tool', url: 'https://github.com/user/react-analysis-tool' },
-    ];
-    setUserRepos(mockRepos);
-    // 이전에 분석했던 기록은 localStorage에서 로드되므로, 로그인 시점에 mockHistory를 덮어쓰지 않음.
-    // 만약 로그인 시점에 특정 mockHistory를 강제로 로드하고 싶다면 아래 주석을 해제하세요.
-    // const mockHistory = [
-    //   { name: 'my-awesome-project', url: 'https://github.com/user/my-awesome-project', date: '2024-05-15' },
-    //   { name: 'legacy-system-check', url: 'https://github.com/org/legacy-system-check', date: '2024-05-10' },
-    // ];
-    // setHistory(mockHistory);
-
-    alert('GitHub 로그인에 성공했습니다.');
+    // 백엔드 인증 페이지로 이동
+    window.location.href = 'http://3.39.190.222:5000/api/auth/github';
   };
 
   const handleLogout = () => {
     setIsLoggedIn(false);
     setUserRepos([]);
     setHistory([]); // 로그아웃 시 분석 기록도 초기화
-    localStorage.removeItem('isLoggedIn');
-    localStorage.removeItem('userRepos');
-    localStorage.removeItem('analysisHistory');
+    localStorage.clear(); // 모든 인증 정보 제거
     alert('로그아웃 되었습니다.');
   };
 
