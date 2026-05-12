@@ -142,6 +142,7 @@ class PullRequestDetail(db.Model):
     comments = db.Column(db.Text, nullable=True)                         # PR 댓글 및 코드리뷰 대화 내역
     state = db.Column(db.String(20), nullable=False)                     # 상태 (open, closed 등)
     created_at = db.Column(db.DateTime, nullable=False)                  # 작성일
+    merged_by = db.Column(db.String(100), nullable=True)                 # merge한 사용자 깃허브 ID
 
 # 테이블 6: 이슈 상세 데이터 (IssueDetail) - AI 문맥 분석용 Deep Data
 class IssueDetail(db.Model):
@@ -425,15 +426,22 @@ def collect_project_data_task(self, project_id):
                 if not existing_pr:
                     # [댓글 수집 로직]
                     comments_list = []
+                    merger_login = None  # (NEW) 머지 수행자 초기화
+                    
                     try:
                         # 1. 일반 PR 댓글
                         for comment in pr.get_comments():
                             comments_list.append(f"[{comment.user.login}]: {comment.body}")
                             
-                        # 2. 코드 라인에 남긴 진짜 '코드 리뷰' 댓글
+                        # 2. 코드 라인에 남긴 진짜 '코드 리뷰' 댓글 및 원본 PR 객체 로드
                         pr_obj = repo.get_pull(pr.number)
                         for rev_comment in pr_obj.get_review_comments():
                             comments_list.append(f"[Code Review - {rev_comment.user.login}]: {rev_comment.body}")
+                            
+                        # (NEW) 3. 머지 여부 확인 및 머지한 사람 찾기
+                        if pr_obj.merged and pr_obj.merged_by:
+                            merger_login = pr_obj.merged_by.login
+                            
                     except:
                         pass
                         
@@ -448,6 +456,7 @@ def collect_project_data_task(self, project_id):
                         comments=comments_text,
                         state=pr.state,
                         created_at=pr.created_at,
+                        merged_by=merger_login  # (NEW) DB에 머지한 사람 저장
                     )
                     db.session.add(new_pr)
 
@@ -622,7 +631,8 @@ def get_project_contributions(project_id):
                 "body": pr.body if pr.body else "",
                 "comments": pr.comments.split('\n') if pr.comments else [],
                 "state": pr.state,
-                "date": pr.created_at.strftime("%Y-%m-%d %H:%M:%S") if pr.created_at else None
+                "date": pr.created_at.strftime("%Y-%m-%d %H:%M:%S") if pr.created_at else None,
+                "merged_by": pr.merged_by
             })
 
         # [데이터 3] 이슈 내역 (제목, 본문, 댓글, 상태, 날짜)
