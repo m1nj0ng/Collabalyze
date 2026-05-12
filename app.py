@@ -433,12 +433,17 @@ def collect_project_data_task(self, project_id):
                         for comment in pr.get_comments():
                             comments_list.append(f"[{comment.user.login}]: {comment.body}")
                             
-                        # 2. 코드 라인에 남긴 진짜 '코드 리뷰' 댓글 및 원본 PR 객체 로드
+                        # 2. 코드 라인에 남긴 진짜 '코드 리뷰' 댓글
                         pr_obj = repo.get_pull(pr.number)
                         for rev_comment in pr_obj.get_review_comments():
                             comments_list.append(f"[Code Review - {rev_comment.user.login}]: {rev_comment.body}")
                             
-                        # (NEW) 3. 머지 여부 확인 및 머지한 사람 찾기
+                        # 3. Approve/거절 시 남긴 '리뷰 총평' 댓글 가져오기
+                        for review in pr_obj.get_reviews():
+                            if review.body:  # 내용이 비어있지 않은 경우에만 추가
+                                comments_list.append(f"[Review({review.state}) - {review.user.login}]: {review.body}")
+                            
+                        # 4. 머지 여부 확인 및 머지한 사람 찾기
                         if pr_obj.merged and pr_obj.merged_by:
                             merger_login = pr_obj.merged_by.login
                             
