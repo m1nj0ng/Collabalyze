@@ -344,6 +344,9 @@ def collect_project_data_task(self, project_id):
             IGNORE_EXTENSIONS = ('.md', '.txt', '.png', '.jpg', '.jpeg', '.gif', '.json', '.csv', '.yml', '.yaml')
             
             for c in commits:
+                # (NEW) 부모 커밋이 2개 이상인 경우 = 남이 누른 '머지 커밋'이므로 도둑질 방지를 위해 무시
+                if len(c.parents) > 1:
+                    continue
                 commit_count += 1
                 
                 # [API 한도확인 1] 커밋 100개를 처리할 때마다 API 한도를 확인합니다.
