@@ -208,8 +208,9 @@ def github_callback():
     # 트랜잭션 커밋
     db.session.commit() 
 
-    # 6. 인증 완료 후 프론트엔드(Vercel)로 리다이렉트 및 유저 정보 전달
-    vercel_redirect_url = f"https://collabalyze.vercel.app?user_id={user.id}&github_id={github_id}&profile_image={user.profile_image}"
+    # 6. [임시 수정] 승훈님 로컬 테스트를 위해 리다이렉트 주소를 localhost로 변경
+    # 작업이 완료되면 나중에 다시 진짜 Vercel 주소로 원상복구해야 함
+    vercel_redirect_url = f"http://localhost:5173?user_id={user.id}&github_id={github_id}&profile_image={user.profile_image}"
     return redirect(vercel_redirect_url)
 
 # ==========================================
