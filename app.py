@@ -10,6 +10,7 @@ from celery.result import AsyncResult
 import lizard
 import time
 import calendar
+import math
 
 # 환경 변수 로드
 load_dotenv()
@@ -70,6 +71,54 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
+
+# ==========================================
+# LLM 분석 비용/토큰 추정용 설정값
+# ==========================================
+# MAX_DIFF_CHARS는 실제 품질 최적값이 아니라 API 비용 폭발 방지용 1차 안전값
+MAX_DIFF_CHARS = 8000
+ESTIMATED_PROMPT_OVERHEAD_CHARS = 1800
+ESTIMATED_OUTPUT_TOKENS_PER_COMMIT = 250
+TOKEN_ESTIMATION_CHAR_DIVISOR = 3
+
+# LLM 제공자/모델별 대략 단가(USD / 1M tokens)
+# OpenAI, Claude, Gemini 중 최종 모델은 샘플 테스트 후 결정
+# 실제 과금 전 각 제공자의 공식 가격표 기준으로 재확인 필요
+LLM_PRICING_TABLE = {
+    "openai_gpt_5_4_mini": {
+        "provider": "OpenAI",
+        "model": "gpt-5.4-mini",
+        "input_per_1m": 0.75,
+        "output_per_1m": 4.50
+    },
+    "claude_haiku_4_5": {
+        "provider": "Anthropic",
+        "model": "claude-haiku-4.5",
+        "input_per_1m": 1.00,
+        "output_per_1m": 5.00
+    },
+    "gemini_3_1_flash_lite_preview": {
+        "provider": "Google",
+        "model": "gemini-3.1-flash-lite-preview",
+        "input_per_1m": 0.25,
+        "output_per_1m": 1.50
+    }
+}
+
+# 문서/설정 중심 커밋을 대략 구분하기 위한 파일 기준
+DOC_OR_CONFIG_EXTENSIONS = (
+    '.md', '.txt', '.rst',
+    '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico',
+    '.json', '.csv', '.yml', '.yaml',
+    '.lock'
+)
+
+DOC_OR_CONFIG_FILENAMES = (
+    'Makefile',
+    'requirements.txt',
+    'requirements-dev.txt',
+    '.gitignore'
+)
 
 # ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
@@ -604,6 +653,199 @@ def get_task_status(task_id):
         }
 
     return jsonify(response)
+
+# ==========================================
+# 5.3. LLM 분석 비용/토큰 추정 API 라우터 (GET)
+# ==========================================
+@app.route('/api/projects/<int:project_id>/analysis-estimate', methods=['GET'])
+def get_analysis_estimate(project_id):
+    """
+    실제 LLM API를 호출하지 않고, 저장된 커밋 Diff 기준으로 예상 토큰/비용을 계산하는 API
+    """
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({"error": "해당 프로젝트를 찾을 수 없습니다."}), 404
+
+    commits = CommitDetail.query.filter_by(project_id=project.id).all()
+
+    def extract_changed_files(diff_text):
+        """저장된 diff_text에서 파일 구분 라인(--- filename ---)을 추출"""
+        changed_files = []
+        for line in diff_text.splitlines():
+            if line.startswith("--- ") and line.endswith(" ---"):
+                filename = line[4:-4].strip()
+                if filename:
+                    changed_files.append(filename)
+        return changed_files
+
+    def is_doc_or_config_file(filename):
+        """문서/설정 중심 파일인지 대략 판별"""
+        lower_filename = filename.lower()
+        lower_basename = os.path.basename(filename).lower()
+        doc_or_config_filenames = tuple(name.lower() for name in DOC_OR_CONFIG_FILENAMES)
+
+        return (
+            lower_filename.endswith(DOC_OR_CONFIG_EXTENSIONS)
+            or lower_basename in doc_or_config_filenames
+        )
+
+    def estimate_tokens_for_commit(diff_chars):
+        """Diff 길이와 고정 프롬프트 길이를 기준으로 커밋 1개의 예상 토큰 수 계산"""
+        effective_diff_chars = min(diff_chars, MAX_DIFF_CHARS)
+        estimated_input_chars = ESTIMATED_PROMPT_OVERHEAD_CHARS + effective_diff_chars
+        estimated_input_tokens = math.ceil(estimated_input_chars / TOKEN_ESTIMATION_CHAR_DIVISOR)
+        estimated_output_tokens = ESTIMATED_OUTPUT_TOKENS_PER_COMMIT
+
+        return estimated_input_tokens, estimated_output_tokens
+
+    def calculate_estimated_cost(input_tokens, output_tokens):
+        """모델별 입력/출력 토큰 단가를 기준으로 예상 비용 계산"""
+        estimated_cost = {}
+
+        for model_key, price_info in LLM_PRICING_TABLE.items():
+            input_cost = (input_tokens / 1_000_000) * price_info["input_per_1m"]
+            output_cost = (output_tokens / 1_000_000) * price_info["output_per_1m"]
+
+            estimated_cost[model_key] = {
+                "provider": price_info["provider"],
+                "model": price_info["model"],
+                "estimated_usd": round(input_cost + output_cost, 4),
+                "input_cost_usd": round(input_cost, 4),
+                "output_cost_usd": round(output_cost, 4)
+            }
+
+        return estimated_cost
+
+    total_commits = len(commits)
+    commits_with_diff = 0
+    empty_diff_commits = 0
+    truncated_commits = 0
+    doc_or_config_only_commits = 0
+    doc_or_config_heavy_commits = 0
+    code_like_commits = 0
+    largest_diff_chars = 0
+
+    total_input_tokens_all = 0
+    total_output_tokens_all = 0
+    total_input_tokens_code_like = 0
+    total_output_tokens_code_like = 0
+
+    commit_summaries = []
+
+    for commit in commits:
+        diff_text = commit.diff_text or ""
+        diff_chars = len(diff_text)
+        largest_diff_chars = max(largest_diff_chars, diff_chars)
+
+        changed_files = extract_changed_files(diff_text)
+        file_count = len(changed_files)
+        doc_or_config_file_count = sum(
+            1 for filename in changed_files
+            if is_doc_or_config_file(filename)
+        )
+
+        is_empty_diff = not diff_text.strip()
+        is_truncated = diff_chars > MAX_DIFF_CHARS
+
+        if is_empty_diff:
+            empty_diff_commits += 1
+        else:
+            commits_with_diff += 1
+
+        if is_truncated:
+            truncated_commits += 1
+
+        if file_count > 0 and doc_or_config_file_count == file_count:
+            doc_or_config_only_commits += 1
+            commit_type = "doc_or_config_only"
+        elif file_count > 0 and (doc_or_config_file_count / file_count) >= 0.7:
+            doc_or_config_heavy_commits += 1
+            commit_type = "doc_or_config_heavy"
+        else:
+            code_like_commits += 1
+            commit_type = "code_like"
+
+        if not is_empty_diff:
+            input_tokens, output_tokens = estimate_tokens_for_commit(diff_chars)
+            total_input_tokens_all += input_tokens
+            total_output_tokens_all += output_tokens
+
+            # 문서/설정 파일만 변경된 커밋은 코드 품질 점수 대상에서 제외될 가능성이 높다고 보고 별도 추정
+            if commit_type != "doc_or_config_only":
+                total_input_tokens_code_like += input_tokens
+                total_output_tokens_code_like += output_tokens
+
+        commit_summaries.append({
+            "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+            "message": commit.message.splitlines()[0] if commit.message else "",
+            "diff_chars": diff_chars,
+            "loc_added": commit.loc_added,
+            "loc_deleted": commit.loc_deleted,
+            "file_count": file_count,
+            "doc_or_config_file_count": doc_or_config_file_count,
+            "diff_truncated": is_truncated,
+            "estimated_type": commit_type
+        })
+
+    largest_commits = sorted(
+        commit_summaries,
+        key=lambda item: item["diff_chars"],
+        reverse=True
+    )[:5]
+
+    return jsonify({
+        "status": "success",
+        "project_id": project.id,
+        "project_name": project.name,
+
+        "settings": {
+            "max_diff_chars": MAX_DIFF_CHARS,
+            "estimated_prompt_overhead_chars": ESTIMATED_PROMPT_OVERHEAD_CHARS,
+            "estimated_output_tokens_per_commit": ESTIMATED_OUTPUT_TOKENS_PER_COMMIT,
+            "token_estimation_rule": f"ceil(chars / {TOKEN_ESTIMATION_CHAR_DIVISOR})"
+        },
+
+        "commit_counts": {
+            "total_commits": total_commits,
+            "commits_with_diff": commits_with_diff,
+            "empty_diff_commits": empty_diff_commits,
+            "truncated_commits": truncated_commits,
+            "code_like_commits": code_like_commits,
+            "doc_or_config_only_commits": doc_or_config_only_commits,
+            "doc_or_config_heavy_commits": doc_or_config_heavy_commits
+        },
+
+        "estimate_if_all_diff_commits_analyzed": {
+            "estimated_input_tokens": total_input_tokens_all,
+            "estimated_output_tokens": total_output_tokens_all,
+            "estimated_total_tokens": total_input_tokens_all + total_output_tokens_all,
+            "estimated_cost_usd": calculate_estimated_cost(
+                total_input_tokens_all,
+                total_output_tokens_all
+            )
+        },
+
+        "estimate_if_doc_config_only_commits_skipped": {
+            "estimated_input_tokens": total_input_tokens_code_like,
+            "estimated_output_tokens": total_output_tokens_code_like,
+            "estimated_total_tokens": total_input_tokens_code_like + total_output_tokens_code_like,
+            "estimated_cost_usd": calculate_estimated_cost(
+                total_input_tokens_code_like,
+                total_output_tokens_code_like
+            )
+        },
+
+        "largest_diff_chars": largest_diff_chars,
+        "largest_commits": largest_commits,
+
+        "notes": [
+            "이 API는 실제 LLM을 호출하지 않습니다.",
+            "비용은 diff_text 길이와 고정 출력 토큰 수를 기반으로 한 보수적 추정치입니다.",
+            "doc_or_config_only 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
+            "diff_truncated가 true인 커밋은 실제 분석 시 제공되지 않은 Diff 뒷부분을 추측하지 않도록 제한해야 합니다.",
+            "실제 비용은 모델, 프롬프트 길이, 출력 길이, 캐시 여부에 따라 달라질 수 있습니다."
+        ]
+    })
 
 # ==========================================
 # 6. 프로젝트 기여도 데이터 조회 API (GET) - 시간 및 상태 정보 포함 버전
