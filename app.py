@@ -126,9 +126,13 @@ class CommitDetail(db.Model):
     
     # [2. 백엔드 정적 분석 데이터]
     complexity_score = db.Column(db.Float, nullable=True)                # 사이클로매틱 복잡도 점수
+    commit_backend_score = db.Column(db.Float, nullable=True)            # 커밋 단위 백엔드 코드 품질 점수
     committed_at = db.Column(db.DateTime, nullable=False)                # 실제 깃허브에 커밋된 날짜와 시간
 
     diff_text = db.Column(db.Text, nullable=True)                        # 코드 변경 사항 원본 텍스트(Diff)
+    commit_summary = db.Column(db.Text, nullable=True)                   # Diff 기반 커밋 내용 요약
+    analysis_status = db.Column(db.String(30), nullable=True)            # 커밋 분석 상태(success, skipped, failed 등)
+    score_reason = db.Column(db.Text, nullable=True)                     # 백엔드 코드 점수 산정 근거
 
 # 테이블 5: PR 상세 데이터 (PullRequestDetail) - AI 문맥 분석용 Deep Data
 class PullRequestDetail(db.Model):
@@ -616,15 +620,30 @@ def get_project_contributions(project_id):
     for c in contributions:
         user_id = c.user_id
         
-        # [데이터 1] 커밋 내역 (메시지 + 날짜)
+        # [데이터 1] 커밋 내역 (메시지 + 날짜 + 요약)
         # diff_text는 백엔드 분석용이므로 여기서는 제외하고 AI 팀원용 데이터만 구성
         commits = CommitDetail.query.filter_by(user_id=user_id, project_id=project.id).all()
         commit_data_list = []
         for commit in commits:
             commit_data_list.append({
                 "message": commit.message if commit.message else "",
-                "date": commit.committed_at.strftime("%Y-%m-%d %H:%M:%S") if commit.committed_at else None
+                "date": commit.committed_at.strftime("%Y-%m-%d %H:%M:%S") if commit.committed_at else None,
+                "commit_summary": commit.commit_summary
             })
+        
+        total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
+        
+        # [데이터 1-1] 커밋별 백엔드 코드 점수 평균 계산
+        commit_backend_scores = [
+            commit.commit_backend_score
+            for commit in commits
+            if commit.commit_backend_score is not None
+        ]
+        backend_code_score = (
+            round(sum(commit_backend_scores) / len(commit_backend_scores), 2)
+            if commit_backend_scores
+            else None
+        )
         
         total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
         
@@ -674,7 +693,7 @@ def get_project_contributions(project_id):
             
             "3_static_code_analysis_data": {
                 "total_complexity_score": total_complexity,
-                "backend_code_score": None
+                "backend_code_score": backend_code_score
             }
         }
         result.append(user_data)
