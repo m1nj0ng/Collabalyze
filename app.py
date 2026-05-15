@@ -309,7 +309,7 @@ def enforce_rate_limit(g):
 # ==========================================
 # 5. 프로젝트 데이터 수집 비동기 Task (@celery.task)
 # ==========================================
-@celery.task(bind=True)
+@celery.task(bind=True, name="app.collect_project_data_task")
 def collect_project_data_task(self, project_id):
     """
     백그라운드에서 GitHub API와 통신하여 데이터를 수집하고 DB에 저장하는 함수
