@@ -120,6 +120,19 @@ DOC_OR_CONFIG_FILENAMES = (
     '.gitignore'
 )
 
+# 포맷팅/스타일 정리 중심 커밋을 대략 구분하기 위한 메시지 키워드
+FORMAT_ONLY_MESSAGE_KEYWORDS = (
+    'format',
+    'reformat',
+    'formatter',
+    'black',
+    'prettier',
+    'lint',
+    'style',
+    'autopep8',
+    'isort'
+)
+
 # ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
 # ==========================================
@@ -688,6 +701,11 @@ def get_analysis_estimate(project_id):
             lower_filename.endswith(DOC_OR_CONFIG_EXTENSIONS)
             or lower_basename in doc_or_config_filenames
         )
+    
+    def is_format_only_commit(message):
+        """커밋 메시지 기준으로 포맷팅/스타일 정리 중심 커밋인지 대략 판별"""
+        lower_message = (message or "").lower()
+        return any(keyword in lower_message for keyword in FORMAT_ONLY_MESSAGE_KEYWORDS)    
 
     def estimate_tokens_for_commit(diff_chars):
         """Diff 길이와 고정 프롬프트 길이를 기준으로 커밋 1개의 예상 토큰 수 계산"""
@@ -722,7 +740,9 @@ def get_analysis_estimate(project_id):
     truncated_commits = 0
     doc_or_config_only_commits = 0
     doc_or_config_heavy_commits = 0
+    format_only_commits = 0
     code_like_commits = 0
+    large_code_diff_commits = 0
     largest_diff_chars = 0
 
     total_input_tokens_all = 0
@@ -749,29 +769,36 @@ def get_analysis_estimate(project_id):
 
         if is_empty_diff:
             empty_diff_commits += 1
+            commit_type = "empty_diff"
         else:
             commits_with_diff += 1
 
-        if is_truncated:
-            truncated_commits += 1
+            if is_truncated:
+                truncated_commits += 1
 
-        if file_count > 0 and doc_or_config_file_count == file_count:
-            doc_or_config_only_commits += 1
-            commit_type = "doc_or_config_only"
-        elif file_count > 0 and (doc_or_config_file_count / file_count) >= 0.7:
-            doc_or_config_heavy_commits += 1
-            commit_type = "doc_or_config_heavy"
-        else:
-            code_like_commits += 1
-            commit_type = "code_like"
+            if is_format_only_commit(commit.message):
+                format_only_commits += 1
+                commit_type = "format_only"
+            elif file_count > 0 and doc_or_config_file_count == file_count:
+                doc_or_config_only_commits += 1
+                commit_type = "doc_or_config_only"
+            elif file_count > 0 and (doc_or_config_file_count / file_count) >= 0.7:
+                doc_or_config_heavy_commits += 1
+                commit_type = "doc_or_config_heavy"
+            else:
+                code_like_commits += 1
+                commit_type = "large_code_diff" if is_truncated else "code_like"
+
+                if is_truncated:
+                    large_code_diff_commits += 1
 
         if not is_empty_diff:
             input_tokens, output_tokens = estimate_tokens_for_commit(diff_chars)
             total_input_tokens_all += input_tokens
             total_output_tokens_all += output_tokens
 
-            # 문서/설정 파일만 변경된 커밋은 코드 품질 점수 대상에서 제외될 가능성이 높다고 보고 별도 추정
-            if commit_type != "doc_or_config_only":
+            # 문서/설정 전용 및 포맷팅 전용 커밋은 코드 품질 점수 대상에서 제외될 가능성이 높다고 보고 별도 추정
+            if commit_type not in ("doc_or_config_only", "format_only"):
                 total_input_tokens_code_like += input_tokens
                 total_output_tokens_code_like += output_tokens
 
@@ -802,7 +829,7 @@ def get_analysis_estimate(project_id):
             "max_diff_chars": MAX_DIFF_CHARS,
             "estimated_prompt_overhead_chars": ESTIMATED_PROMPT_OVERHEAD_CHARS,
             "estimated_output_tokens_per_commit": ESTIMATED_OUTPUT_TOKENS_PER_COMMIT,
-            "token_estimation_rule": f"ceil(chars / {TOKEN_ESTIMATION_CHAR_DIVISOR})"
+            "token_estimation_rule": f"ceil((prompt_overhead_chars + min(diff_chars, max_diff_chars)) / {TOKEN_ESTIMATION_CHAR_DIVISOR})"
         },
 
         "commit_counts": {
@@ -811,11 +838,13 @@ def get_analysis_estimate(project_id):
             "empty_diff_commits": empty_diff_commits,
             "truncated_commits": truncated_commits,
             "code_like_commits": code_like_commits,
+            "large_code_diff_commits": large_code_diff_commits,
+            "format_only_commits": format_only_commits,
             "doc_or_config_only_commits": doc_or_config_only_commits,
             "doc_or_config_heavy_commits": doc_or_config_heavy_commits
         },
 
-        "estimate_if_all_diff_commits_analyzed": {
+        "estimate_if_all_diff_commits_considered_with_truncation": {
             "estimated_input_tokens": total_input_tokens_all,
             "estimated_output_tokens": total_output_tokens_all,
             "estimated_total_tokens": total_input_tokens_all + total_output_tokens_all,
@@ -825,7 +854,7 @@ def get_analysis_estimate(project_id):
             )
         },
 
-        "estimate_if_doc_config_only_commits_skipped": {
+        "estimate_if_score_excluded_commits_skipped": {
             "estimated_input_tokens": total_input_tokens_code_like,
             "estimated_output_tokens": total_output_tokens_code_like,
             "estimated_total_tokens": total_input_tokens_code_like + total_output_tokens_code_like,
@@ -841,8 +870,9 @@ def get_analysis_estimate(project_id):
         "notes": [
             "이 API는 실제 LLM을 호출하지 않습니다.",
             "비용은 diff_text 길이와 고정 출력 토큰 수를 기반으로 한 보수적 추정치입니다.",
-            "doc_or_config_only 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
+            "doc_or_config_only 및 format_only 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
             "diff_truncated가 true인 커밋은 실제 분석 시 제공되지 않은 Diff 뒷부분을 추측하지 않도록 제한해야 합니다.",
+            "large_code_diff 커밋은 앞부분만 보고 점수를 단정하지 않고, 추후 chunk 분석 또는 별도 분석 대상으로 분리하는 것이 안전합니다.",
             "실제 비용은 모델, 프롬프트 길이, 출력 길이, 캐시 여부에 따라 달라질 수 있습니다."
         ]
     })
