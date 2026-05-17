@@ -121,9 +121,25 @@ DOC_OR_CONFIG_EXTENSIONS = (
 
 DOC_OR_CONFIG_FILENAMES = (
     'Makefile',
+    'Dockerfile',
+    'README',
+    'LICENSE',
+    'CHANGELOG',
+    'CONTRIBUTING',
+    'CODE_OF_CONDUCT',
+    'SECURITY',
     'requirements.txt',
     'requirements-dev.txt',
     '.gitignore'
+)
+
+DOC_OR_CONFIG_BASENAME_PREFIXES = (
+    'readme',
+    'license',
+    'changelog',
+    'contributing',
+    'code_of_conduct',
+    'security'
 )
 
 # 포맷팅/스타일 정리 중심 커밋을 대략 구분하기 위한 메시지 기준
@@ -153,6 +169,37 @@ FORMAT_ONLY_MESSAGE_PHRASES = (
 # 기존 analysis-estimate 로직과의 호환을 위한 보수적 기준 묶음
 FORMAT_ONLY_MESSAGE_KEYWORDS = STRONG_FORMAT_ONLY_KEYWORDS + FORMAT_ONLY_MESSAGE_PHRASES
 
+# 단순 URL/환경값 변경 커밋을 대략 구분하기 위한 보수적 기준
+ENV_OR_URL_ONLY_MESSAGE_PHRASES = (
+    '로컬 테스트',
+    '임시 변경',
+    '원상복구',
+    'vercel 라이브',
+    'redirect url',
+    'redirect address',
+    'callback url',
+    '리다이렉트 url',
+    '리다이렉트 주소',
+    'localhost',
+    'vercel'
+)
+
+ENV_OR_URL_ONLY_DIFF_KEYWORDS = (
+    'localhost',
+    '127.0.0.1',
+    'vercel.app',
+    'http://localhost',
+    'https://localhost',
+    'redirect_url',
+    'callback_url',
+    'oauth redirect'
+)
+
+ENV_OR_URL_ONLY_MAX_CHANGED_LINES = 12
+ENV_OR_URL_ONLY_MAX_LOC_CHANGE = 12
+ENV_OR_URL_ONLY_MAX_DIFF_CHARS = 2500
+ENV_OR_URL_ONLY_MAX_FILES = 2
+
 # ==========================================
 # LLM 분석 공통 Helper 함수
 # ==========================================
@@ -171,11 +218,18 @@ def is_doc_or_config_file(filename):
     """문서/설정 중심 파일인지 대략 판별"""
     lower_filename = (filename or "").lower()
     lower_basename = os.path.basename(filename or "").lower()
+    _, extension = os.path.splitext(lower_basename)
+
     doc_or_config_filenames = tuple(name.lower() for name in DOC_OR_CONFIG_FILENAMES)
+    doc_or_config_prefixes = tuple(name.lower() for name in DOC_OR_CONFIG_BASENAME_PREFIXES)
 
     return (
         lower_filename.endswith(DOC_OR_CONFIG_EXTENSIONS)
         or lower_basename in doc_or_config_filenames
+        or (
+            not extension
+            and any(lower_basename.startswith(prefix) for prefix in doc_or_config_prefixes)
+        )
     )
 
 
@@ -191,6 +245,81 @@ def is_format_only_commit(message):
 
     return False
 
+def get_diff_changed_lines(diff_text):
+    """Diff에서 실제 추가/삭제된 라인만 추출"""
+    changed_lines = []
+
+    for line in (diff_text or "").splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+
+        if line.startswith("+") or line.startswith("-"):
+            changed_lines.append(line[1:].strip())
+
+    return changed_lines
+
+def is_env_or_url_only_commit(commit, changed_files, diff_chars):
+    """단순 URL/환경값 변경 중심 커밋인지 보수적으로 판별"""
+    message = (commit.message or "").lower()
+    diff_text = commit.diff_text or ""
+    lower_diff = diff_text.lower()
+
+    message_has_env_url_phrase = any(
+        phrase in message
+        for phrase in ENV_OR_URL_ONLY_MESSAGE_PHRASES
+    )
+
+    if not message_has_env_url_phrase:
+        return False
+
+    if not diff_text.strip():
+        return False
+
+    if len(changed_files) > ENV_OR_URL_ONLY_MAX_FILES:
+        return False
+
+    loc_changed = (commit.loc_added or 0) + (commit.loc_deleted or 0)
+    if loc_changed > ENV_OR_URL_ONLY_MAX_LOC_CHANGE:
+        return False
+
+    if diff_chars > ENV_OR_URL_ONLY_MAX_DIFF_CHARS:
+        return False
+
+    changed_lines = get_diff_changed_lines(diff_text)
+    if len(changed_lines) > ENV_OR_URL_ONLY_MAX_CHANGED_LINES:
+        return False
+
+    changed_text = "\n".join(changed_lines).lower()
+
+    diff_has_env_url_keyword = any(
+        keyword in lower_diff
+        for keyword in ENV_OR_URL_ONLY_DIFF_KEYWORDS
+    )
+
+    if not diff_has_env_url_keyword:
+        return False
+
+    # 함수/DB/API 구조 자체가 바뀐 커밋은 단순 환경값 변경으로 보지 않음
+    structural_code_patterns = (
+        'def ',
+        'class ',
+        '@app.route',
+        'db.column',
+        'requests.',
+        'repo.get_',
+        'query.filter',
+        'db.session',
+        'return jsonify',
+        'try:',
+        'except',
+        'import ',
+        'from '
+    )
+
+    if any(pattern in changed_text for pattern in structural_code_patterns):
+        return False
+
+    return True
 
 def classify_commit_for_analysis(commit):
     """커밋 Diff와 메타데이터를 기준으로 LLM 분석용 커밋 유형을 분류"""
@@ -210,6 +339,8 @@ def classify_commit_for_analysis(commit):
         estimated_type = "empty_diff"
     elif is_format_only_commit(commit.message):
         estimated_type = "format_only"
+    elif is_env_or_url_only_commit(commit, changed_files, diff_chars):
+        estimated_type = "env_or_url_only"
     elif file_count > 0 and doc_or_config_file_count == file_count:
         estimated_type = "doc_or_config_only"
     elif file_count > 0 and (doc_or_config_file_count / file_count) >= 0.7:
@@ -351,6 +482,8 @@ Do not use "truncated" as analysis_status.
 - Keep this field short because it is only for verification.
 - Use Korean as much as possible.
 - English technical terms are allowed only when they are natural code/API terms such as except, null, API, DB, JSON, or diff.
+- Do not write generic praise such as "잘 구현되었습니다", "성공적으로 추가되었습니다", or "기능 구현이 잘 되었습니다".
+- Mention one concrete technical reason, limitation, or risk that explains the score or status.
 
 Commit type policy:
 
@@ -384,6 +517,14 @@ Do not invent missing information.
 - Only assign "success" if the visible code diff contains meaningful backend logic changes, not just comments, docstrings, generated docs, dependency setup, documentation configuration, or documentation annotations.
 - If skipped, commit_backend_score must be null and analysis_status must be "skipped".
 - If the visible backend code change is clearly meaningful and sufficiently reviewable, analysis_status may be "success" and commit_backend_score may be assigned.
+
+4-1. env_or_url_only
+- Treat simple environment value, redirect URL, callback URL, localhost, Vercel URL, or temporary frontend test URL changes as outside backend code-quality scoring.
+- commit_summary: create a concise summary of the URL/environment value adjustment.
+- commit_backend_score: null.
+- analysis_status: "skipped".
+- score_reason: explain that URL/environment value changes are excluded from backend code-quality scoring.
+- Do not assign a numeric score only because the change appears in a backend file such as app.py.
 
 5. code_like
 - Analyze the provided diff.
@@ -471,6 +612,7 @@ Scoring guidance:
 - 60-69: Weak implementation with meaningful concerns, but still partially functional.
 - 40-59: Significant quality issues, fragile logic, poor structure, or risky behavior.
 - 0-39: Very poor or unsafe code change, clearly broken or largely unsuitable.
+- Do not assign 80+ merely because an API endpoint or feature was added; scores above 80 require visible evidence of coherent structure, basic edge-case handling, and maintainability.
 
 Important:
 - Do not reward large LOC by itself.
@@ -541,6 +683,9 @@ def build_policy_based_summary(commit, classification):
 
         return "코드 포맷팅 및 스타일 정리 중심의 변경을 적용함."
 
+    if estimated_type == "env_or_url_only":
+        return "프론트엔드 연동 테스트를 위해 리다이렉트 URL 또는 환경값을 조정함."
+    
     if estimated_type == "doc_or_config_only":
         return "문서 또는 설정 파일 중심으로 프로젝트 설명과 환경 구성을 정리함."
 
@@ -586,6 +731,9 @@ def build_policy_based_analysis_result(commit, classification=None):
     elif estimated_type == "format_only":
         analysis_status = "skipped"
         score_reason = "포맷팅 중심 변경으로 코드 품질 점수 산정에서 제외함."
+    elif estimated_type == "env_or_url_only":
+        analysis_status = "skipped"
+        score_reason = "환경값 또는 URL 수준의 변경으로 코드 품질 점수 산정에서 제외함."
     elif estimated_type in ("doc_or_config_only", "doc_or_config_heavy"):
         analysis_status = "skipped"
         score_reason = "문서/설정 중심 변경으로 코드 품질 점수 산정에서 제외함."
@@ -604,7 +752,7 @@ def build_policy_based_analysis_result(commit, classification=None):
     }
 
 
-def validate_commit_analysis_result(result):
+def validate_commit_analysis_result(result, expected_type=None):
     """커밋 분석 결과 JSON이 저장 가능한 형태인지 검증하고 필요한 값만 정리"""
     if not isinstance(result, dict):
         raise ValueError("커밋 분석 결과가 dict 형식이 아닙니다.")
@@ -647,6 +795,22 @@ def validate_commit_analysis_result(result):
     if analysis_status != "success" and commit_backend_score is not None:
         raise ValueError("success가 아닌 상태에서는 commit_backend_score가 null이어야 합니다.")
 
+    # 입력 분류와 LLM 결과 상태의 일관성 검증
+    if expected_type == "code_like" and analysis_status != "success":
+        raise ValueError("code_like 커밋은 LLM 분석 결과가 success여야 합니다.")
+
+    if expected_type in (
+        "empty_diff",
+        "format_only",
+        "env_or_url_only",
+        "doc_or_config_only",
+        "doc_or_config_heavy"
+    ) and analysis_status != "skipped":
+        raise ValueError(f"{expected_type} 커밋은 skipped 상태여야 합니다.")
+
+    if expected_type == "large_code_diff" and analysis_status != "large_diff_pending":
+        raise ValueError("large_code_diff 커밋은 large_diff_pending 상태여야 합니다.")
+
     return {
         "commit_summary": commit_summary,
         "commit_backend_score": commit_backend_score,
@@ -655,9 +819,9 @@ def validate_commit_analysis_result(result):
     }
 
 
-def save_commit_analysis_result(commit, result):
+def save_commit_analysis_result(commit, result, expected_type=None):
     """검증된 커밋 분석 결과를 CommitDetail row에 반영"""
-    validated_result = validate_commit_analysis_result(result)
+    validated_result = validate_commit_analysis_result(result, expected_type=expected_type)
 
     commit.commit_summary = validated_result["commit_summary"]
     commit.commit_backend_score = validated_result["commit_backend_score"]
@@ -795,7 +959,10 @@ def call_llm_for_commit_analysis(commit_input):
     response_text = extract_text_from_gemini_response(response_json)
     parsed_result = parse_llm_json_response(response_text)
 
-    return validate_commit_analysis_result(parsed_result)
+    return validate_commit_analysis_result(
+        parsed_result,
+        expected_type=safe_commit_input.get("estimated_type")
+    )
 
 # ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
@@ -1352,6 +1519,7 @@ def get_analysis_estimate(project_id):
     doc_or_config_only_commits = 0
     doc_or_config_heavy_commits = 0
     format_only_commits = 0
+    env_or_url_only_commits = 0
     code_like_commits = 0
     large_code_diff_commits = 0
     largest_diff_chars = 0
@@ -1383,6 +1551,8 @@ def get_analysis_estimate(project_id):
 
             if commit_type == "format_only":
                 format_only_commits += 1
+            elif commit_type == "env_or_url_only":
+                env_or_url_only_commits += 1
             elif commit_type == "doc_or_config_only":
                 doc_or_config_only_commits += 1
             elif commit_type == "doc_or_config_heavy":
@@ -1399,7 +1569,7 @@ def get_analysis_estimate(project_id):
             total_output_tokens_all += output_tokens
 
             # 문서/설정 전용 및 포맷팅 전용 커밋은 코드 품질 점수 대상에서 제외될 가능성이 높다고 보고 별도 추정
-            if commit_type not in ("doc_or_config_only", "format_only"):
+            if commit_type not in ("doc_or_config_only", "format_only", "env_or_url_only"):
                 total_input_tokens_code_like += input_tokens
                 total_output_tokens_code_like += output_tokens
 
@@ -1441,6 +1611,7 @@ def get_analysis_estimate(project_id):
             "code_like_commits": code_like_commits,
             "large_code_diff_commits": large_code_diff_commits,
             "format_only_commits": format_only_commits,
+            "env_or_url_only_commits": env_or_url_only_commits,
             "doc_or_config_only_commits": doc_or_config_only_commits,
             "doc_or_config_heavy_commits": doc_or_config_heavy_commits
         },
@@ -1557,7 +1728,7 @@ def analyze_static_code(project_id):
             try:
                 commit_input = build_commit_input(commit)
                 llm_result = call_llm_for_commit_analysis(commit_input)
-                save_commit_analysis_result(commit, llm_result)
+                save_commit_analysis_result(commit, llm_result, expected_type=estimated_type)
 
                 llm_processed_count += 1
 
@@ -1594,7 +1765,7 @@ def analyze_static_code(project_id):
             continue
 
         try:
-            save_commit_analysis_result(commit, analysis_result)
+            save_commit_analysis_result(commit, analysis_result, expected_type=estimated_type)
             policy_processed_count += 1
 
             if analysis_result["analysis_status"] == "skipped":
