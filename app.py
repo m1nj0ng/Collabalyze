@@ -9,7 +9,6 @@ from celery import Celery
 from celery.result import AsyncResult
 import lizard
 import time
-import calendar
 import math
 import json
 
@@ -92,23 +91,23 @@ TOKEN_ESTIMATION_CHAR_DIVISOR = 3
 # OpenAI, Claude, Gemini 중 최종 모델은 샘플 테스트 후 결정
 # 실제 과금 전 각 제공자의 공식 가격표 기준으로 재확인 필요
 LLM_PRICING_TABLE = {
-    "openai_gpt_5_4_mini": {
+    "gemini_2_5_flash_lite": {
+        "provider": "Google",
+        "model": "gemini-2.5-flash-lite",
+        "input_per_1m": 0.10,
+        "output_per_1m": 0.40
+    },
+    "gpt_5_mini": {
         "provider": "OpenAI",
-        "model": "gpt-5.4-mini",
-        "input_per_1m": 0.75,
-        "output_per_1m": 4.50
+        "model": "gpt-5-mini",
+        "input_per_1m": 0.25,
+        "output_per_1m": 2.00
     },
     "claude_haiku_4_5": {
         "provider": "Anthropic",
-        "model": "claude-haiku-4.5",
+        "model": "claude-haiku-4-5",
         "input_per_1m": 1.00,
         "output_per_1m": 5.00
-    },
-    "gemini_3_1_flash_lite_preview": {
-        "provider": "Google",
-        "model": "gemini-3.1-flash-lite-preview",
-        "input_per_1m": 0.25,
-        "output_per_1m": 1.50
     }
 }
 
@@ -201,6 +200,57 @@ ENV_OR_URL_ONLY_MAX_LOC_CHANGE = 12
 ENV_OR_URL_ONLY_MAX_DIFF_CHARS = 2500
 ENV_OR_URL_ONLY_MAX_FILES = 2
 
+# 실제 코드 구조 변경 여부를 보수적으로 확인하기 위한 패턴
+STRUCTURAL_CODE_PATTERNS = (
+    'def ',
+    'class ',
+    '@app.route',
+    'db.column',
+    'requests.',
+    'repo.get_',
+    'query.filter',
+    'db.session',
+    'return jsonify',
+    'try:',
+    'except',
+    'import ',
+    'from '
+)
+
+# 패키지 버전/배포 메타데이터 변경 커밋을 구분하기 위한 보수적 기준
+PACKAGE_METADATA_FILES = (
+    'setup.py',
+    'setup.cfg',
+    'pyproject.toml'
+)
+
+PACKAGE_METADATA_MESSAGE_PHRASES = (
+    'bump version',
+    'version bump',
+    'bump release',
+    'release version',
+    'prepare release',
+    'version update',
+    'update version'
+)
+
+PACKAGE_METADATA_DIFF_KEYWORDS = (
+    'version',
+    'description',
+    'download_url',
+    'keywords',
+    'classifiers',
+    'author',
+    'author_email',
+    'url',
+    'license'
+)
+
+PACKAGE_METADATA_MAX_CHANGED_LINES = 20
+PACKAGE_METADATA_MAX_LOC_CHANGE = 20
+PACKAGE_METADATA_MAX_DIFF_CHARS = 3000
+PACKAGE_METADATA_MAX_FILES = 2
+
 # ==========================================
 # LLM 분석 공통 Helper 함수
 # ==========================================
@@ -259,6 +309,11 @@ def get_diff_changed_lines(diff_text):
 
     return changed_lines
 
+def has_structural_code_change(changed_lines):
+    """변경 라인에 함수/클래스/API/DB 등 구조적 코드 변경이 포함됐는지 확인"""
+    changed_text = "\n".join(changed_lines).lower()
+    return any(pattern in changed_text for pattern in STRUCTURAL_CODE_PATTERNS)
+
 def is_env_or_url_only_commit(commit, changed_files, diff_chars):
     """단순 URL/환경값 변경 중심 커밋인지 보수적으로 판별"""
     message = (commit.message or "").lower()
@@ -290,8 +345,6 @@ def is_env_or_url_only_commit(commit, changed_files, diff_chars):
     if len(changed_lines) > ENV_OR_URL_ONLY_MAX_CHANGED_LINES:
         return False
 
-    changed_text = "\n".join(changed_lines).lower()
-
     diff_has_env_url_keyword = any(
         keyword in lower_diff
         for keyword in ENV_OR_URL_ONLY_DIFF_KEYWORDS
@@ -301,23 +354,61 @@ def is_env_or_url_only_commit(commit, changed_files, diff_chars):
         return False
 
     # 함수/DB/API 구조 자체가 바뀐 커밋은 단순 환경값 변경으로 보지 않음
-    structural_code_patterns = (
-        'def ',
-        'class ',
-        '@app.route',
-        'db.column',
-        'requests.',
-        'repo.get_',
-        'query.filter',
-        'db.session',
-        'return jsonify',
-        'try:',
-        'except',
-        'import ',
-        'from '
+    if has_structural_code_change(changed_lines):
+        return False
+
+    return True
+
+def is_package_metadata_only_commit(commit, changed_files, diff_chars):
+    """패키지 버전/배포 메타데이터만 바뀐 커밋인지 보수적으로 판별"""
+    message = (commit.message or "").lower()
+    diff_text = commit.diff_text or ""
+
+    if not diff_text.strip():
+        return False
+
+    if not changed_files:
+        return False
+
+    if len(changed_files) > PACKAGE_METADATA_MAX_FILES:
+        return False
+
+    changed_basenames = [
+        os.path.basename(filename or "").lower()
+        for filename in changed_files
+    ]
+
+    if not all(filename in PACKAGE_METADATA_FILES for filename in changed_basenames):
+        return False
+
+    loc_changed = (commit.loc_added or 0) + (commit.loc_deleted or 0)
+    if loc_changed > PACKAGE_METADATA_MAX_LOC_CHANGE:
+        return False
+
+    if diff_chars > PACKAGE_METADATA_MAX_DIFF_CHARS:
+        return False
+
+    changed_lines = get_diff_changed_lines(diff_text)
+    if len(changed_lines) > PACKAGE_METADATA_MAX_CHANGED_LINES:
+        return False
+
+    changed_text = "\n".join(changed_lines).lower()
+
+    message_has_package_phrase = any(
+        phrase in message
+        for phrase in PACKAGE_METADATA_MESSAGE_PHRASES
     )
 
-    if any(pattern in changed_text for pattern in structural_code_patterns):
+    diff_has_metadata_keyword = any(
+        keyword in changed_text
+        for keyword in PACKAGE_METADATA_DIFF_KEYWORDS
+    )
+
+    if not message_has_package_phrase and not diff_has_metadata_keyword:
+        return False
+
+    # setup.py라도 함수/클래스/실행 로직이 바뀌면 코드 변경으로 본다
+    if has_structural_code_change(changed_lines):
         return False
 
     return True
@@ -342,6 +433,8 @@ def classify_commit_for_analysis(commit):
         estimated_type = "format_only"
     elif is_env_or_url_only_commit(commit, changed_files, diff_chars):
         estimated_type = "env_or_url_only"
+    elif is_package_metadata_only_commit(commit, changed_files, diff_chars):
+        estimated_type = "package_metadata_only"
     elif file_count > 0 and doc_or_config_file_count == file_count:
         estimated_type = "doc_or_config_only"
     elif file_count > 0 and (doc_or_config_file_count / file_count) >= 0.7:
@@ -447,6 +540,7 @@ Field rules:
 - Summarize the actual change made by the commit.
 - Prefer describing functional or logical changes rather than listing file names.
 - Use natural Korean endings such as "~추가함", "~수정함", "~개선함", "~처리함".
+- Do not use polite endings such as "~했습니다", "~되었습니다", or "~합니다"; prefer concise endings such as "~함" or "~임".
 - Do not repeat the commit message without adding useful information.
 - Do not infer unstated intent or effects.
 - If the diff is missing, too limited, or not suitable for full analysis, summarize conservatively based only on the given message and metadata.
@@ -485,6 +579,7 @@ Do not use "truncated" as analysis_status.
 - English technical terms are allowed only when they are natural code/API terms such as except, null, API, DB, JSON, or diff.
 - Do not write generic praise such as "잘 구현되었습니다", "성공적으로 추가되었습니다", or "기능 구현이 잘 되었습니다".
 - Mention one concrete technical reason, limitation, or risk that explains the score or status.
+- For success results, mention one concrete strength and one limitation when possible.
 
 Commit type policy:
 
@@ -526,6 +621,14 @@ Do not invent missing information.
 - analysis_status: "skipped".
 - score_reason: explain that URL/environment value changes are excluded from backend code-quality scoring.
 - Do not assign a numeric score only because the change appears in a backend file such as app.py.
+
+4-2. package_metadata_only
+- Treat package version bumps, release metadata, setup.py/setup.cfg/pyproject.toml metadata-only changes as outside backend code-quality scoring.
+- commit_summary: create a concise summary of the package version or metadata update.
+- commit_backend_score: null.
+- analysis_status: "skipped".
+- score_reason: explain that package metadata changes are excluded from backend code-quality scoring.
+- Do not assign a numeric score only because the change appears in a Python file such as setup.py.
 
 5. code_like
 - Analyze the provided diff.
@@ -614,6 +717,8 @@ Scoring guidance:
 - 40-59: Significant quality issues, fragile logic, poor structure, or risky behavior.
 - 0-39: Very poor or unsafe code change, clearly broken or largely unsuitable.
 - Do not assign 80+ merely because an API endpoint or feature was added; scores above 80 require visible evidence of coherent structure, basic edge-case handling, and maintainability.
+- Do not default to 85 for generally good-looking commits.
+- If timeout handling, pagination, JSON parsing safety, null handling, or error observability is not visible, prefer a score below 85 even when the feature works.
 
 Important:
 - Do not reward large LOC by itself.
@@ -687,6 +792,9 @@ def build_policy_based_summary(commit, classification):
     if estimated_type == "env_or_url_only":
         return "프론트엔드 연동 테스트를 위해 리다이렉트 URL 또는 환경값을 조정함."
     
+    if estimated_type == "package_metadata_only":
+        return "패키지 버전 또는 배포 메타데이터를 갱신함."
+
     if estimated_type == "doc_or_config_only":
         return "문서 또는 설정 파일 중심으로 프로젝트 설명과 환경 구성을 정리함."
 
@@ -735,6 +843,9 @@ def build_policy_based_analysis_result(commit, classification=None):
     elif estimated_type == "env_or_url_only":
         analysis_status = "skipped"
         score_reason = "환경값 또는 URL 수준의 변경으로 코드 품질 점수 산정에서 제외함."
+    elif estimated_type == "package_metadata_only":
+        analysis_status = "skipped"
+        score_reason = "패키지 메타데이터 변경으로 코드 품질 점수 산정에서 제외함."
     elif estimated_type in ("doc_or_config_only", "doc_or_config_heavy"):
         analysis_status = "skipped"
         score_reason = "문서/설정 중심 변경으로 코드 품질 점수 산정에서 제외함."
@@ -752,6 +863,38 @@ def build_policy_based_analysis_result(commit, classification=None):
         "score_reason": score_reason
     }
 
+def normalize_commit_summary_style(commit_summary):
+    """LLM이 생성한 정중체 요약을 프로젝트 기준의 간결한 명사형/함체로 보정"""
+    if commit_summary is None:
+        return None
+
+    summary = commit_summary.strip()
+
+    replacements = {
+        "추가했습니다.": "추가함.",
+        "수정했습니다.": "수정함.",
+        "개선했습니다.": "개선함.",
+        "처리했습니다.": "처리함.",
+        "구현했습니다.": "구현함.",
+        "반영했습니다.": "반영함.",
+        "보강했습니다.": "보강함.",
+        "변경했습니다.": "변경함.",
+        "정리했습니다.": "정리함.",
+        "갱신했습니다.": "갱신함.",
+        "업데이트했습니다.": "업데이트함.",
+        "추가되었습니다.": "추가함.",
+        "수정되었습니다.": "수정함.",
+        "개선되었습니다.": "개선함.",
+        "변경되었습니다.": "변경함.",
+        "갱신되었습니다.": "갱신함.",
+        "업데이트되었습니다.": "업데이트함."
+    }
+
+    for old, new in replacements.items():
+        if summary.endswith(old):
+            return summary[: -len(old)] + new
+
+    return summary
 
 def validate_commit_analysis_result(result, expected_type=None):
     """커밋 분석 결과 JSON이 저장 가능한 형태인지 검증하고 필요한 값만 정리"""
@@ -776,6 +919,8 @@ def validate_commit_analysis_result(result, expected_type=None):
 
     if commit_summary is not None and not isinstance(commit_summary, str):
         raise ValueError("commit_summary는 문자열 또는 null이어야 합니다.")
+    
+    commit_summary = normalize_commit_summary_style(commit_summary)
 
     if analysis_status not in VALID_ANALYSIS_STATUSES:
         raise ValueError(f"analysis_status 값이 허용되지 않습니다: {analysis_status}")
@@ -804,6 +949,7 @@ def validate_commit_analysis_result(result, expected_type=None):
         "empty_diff",
         "format_only",
         "env_or_url_only",
+        "package_metadata_only",
         "doc_or_config_only",
         "doc_or_config_heavy"
     ) and analysis_status != "skipped":
@@ -830,39 +976,6 @@ def save_commit_analysis_result(commit, result, expected_type=None):
     commit.score_reason = validated_result["score_reason"]
 
     return commit
-
-# ==========================================
-# Gemini LLM API 호출 Helper 함수
-# ==========================================
-COMMIT_ANALYSIS_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "commit_summary": {
-            "type": ["string", "null"],
-            "description": "Korean one-sentence summary of the commit change"
-        },
-        "commit_backend_score": {
-            "type": ["number", "null"],
-            "description": "Backend code quality score from 0 to 100, or null if not applicable"
-        },
-        "analysis_status": {
-            "type": "string",
-            "enum": ["success", "skipped", "large_diff_pending", "failed"],
-            "description": "Commit analysis status"
-        },
-        "score_reason": {
-            "type": "string",
-            "description": "Short Korean reason for the score or status"
-        }
-    },
-    "required": [
-        "commit_summary",
-        "commit_backend_score",
-        "analysis_status",
-        "score_reason"
-    ],
-    "additionalProperties": False
-}
 
 
 def build_safe_commit_input_for_llm(commit_input):
@@ -960,10 +1073,14 @@ def call_llm_for_commit_analysis(commit_input):
     response_text = extract_text_from_gemini_response(response_json)
     parsed_result = parse_llm_json_response(response_text)
 
-    return validate_commit_analysis_result(
-        parsed_result,
-        expected_type=safe_commit_input.get("estimated_type")
-    )
+    try:
+        return validate_commit_analysis_result(
+            parsed_result,
+            expected_type=safe_commit_input.get("estimated_type")
+        )
+    except ValueError as e:
+        raw_result_preview = json.dumps(parsed_result, ensure_ascii=False)[:500]
+        raise ValueError(f"{str(e)} / raw_result={raw_result_preview}") from e
 
 # ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
@@ -1521,6 +1638,7 @@ def get_analysis_estimate(project_id):
     doc_or_config_heavy_commits = 0
     format_only_commits = 0
     env_or_url_only_commits = 0
+    package_metadata_only_commits = 0
     code_like_commits = 0
     large_code_diff_commits = 0
     largest_diff_chars = 0
@@ -1554,6 +1672,8 @@ def get_analysis_estimate(project_id):
                 format_only_commits += 1
             elif commit_type == "env_or_url_only":
                 env_or_url_only_commits += 1
+            elif commit_type == "package_metadata_only":
+                package_metadata_only_commits += 1
             elif commit_type == "doc_or_config_only":
                 doc_or_config_only_commits += 1
             elif commit_type == "doc_or_config_heavy":
@@ -1570,7 +1690,7 @@ def get_analysis_estimate(project_id):
             total_output_tokens_all += output_tokens
 
             # 문서/설정 전용 및 포맷팅 전용 커밋은 코드 품질 점수 대상에서 제외될 가능성이 높다고 보고 별도 추정
-            if commit_type not in ("doc_or_config_only", "doc_or_config_heavy", "format_only", "env_or_url_only"):
+            if commit_type not in ("doc_or_config_only", "doc_or_config_heavy", "format_only", "env_or_url_only", "package_metadata_only"):
                 total_input_tokens_code_like += input_tokens
                 total_output_tokens_code_like += output_tokens
 
@@ -1613,6 +1733,7 @@ def get_analysis_estimate(project_id):
             "large_code_diff_commits": large_code_diff_commits,
             "format_only_commits": format_only_commits,
             "env_or_url_only_commits": env_or_url_only_commits,
+            "package_metadata_only_commits": package_metadata_only_commits,
             "doc_or_config_only_commits": doc_or_config_only_commits,
             "doc_or_config_heavy_commits": doc_or_config_heavy_commits
         },
@@ -1643,7 +1764,7 @@ def get_analysis_estimate(project_id):
         "notes": [
             "이 API는 실제 LLM을 호출하지 않습니다.",
             "비용은 diff_text 길이와 고정 출력 토큰 수를 기반으로 한 보수적 추정치입니다.",
-            "doc_or_config_only 및 format_only 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
+            "문서/설정, 포맷팅, 환경값/URL, 패키지 메타데이터 중심 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
             "diff_truncated가 true인 커밋은 실제 분석 시 제공되지 않은 Diff 뒷부분을 추측하지 않도록 제한해야 합니다.",
             "large_code_diff 커밋은 앞부분만 보고 점수를 단정하지 않고, 추후 chunk 분석 또는 별도 분석 대상으로 분리하는 것이 안전합니다.",
             "실제 비용은 모델, 프롬프트 길이, 출력 길이, 캐시 여부에 따라 달라질 수 있습니다."
@@ -1780,7 +1901,7 @@ def analyze_static_code(project_id):
                     "estimated_type": estimated_type,
                     "analysis_status": "failed",
                     "action": "llm_failed",
-                    "error": str(e)[:300]
+                    "error": str(e)[:1200]
                 })
 
             continue
@@ -1815,7 +1936,7 @@ def analyze_static_code(project_id):
                 "estimated_type": estimated_type,
                 "analysis_status": "failed",
                 "action": "policy_failed",
-                "error": str(e)[:300]
+                "error": str(e)[:1200]
             })
 
     db.session.commit()
