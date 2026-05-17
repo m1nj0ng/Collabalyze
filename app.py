@@ -768,12 +768,8 @@ def call_llm_for_commit_analysis(commit_input):
         "generationConfig": {
             "temperature": 0.1,
             "maxOutputTokens": 512,
-            "responseFormat": {
-                "text": {
-                    "mimeType": "application/json",
-                    "schema": COMMIT_ANALYSIS_RESPONSE_SCHEMA
-                }
-            }
+            "responseMimeType": "application/json",
+            "responseSchema": COMMIT_ANALYSIS_RESPONSE_SCHEMA
         }
     }
 
