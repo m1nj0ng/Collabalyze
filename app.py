@@ -73,6 +73,11 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
 
+# Gemini API 호출용 설정
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
 # ==========================================
 # LLM 분석 비용/토큰 추정용 설정값
 # ==========================================
@@ -660,6 +665,142 @@ def save_commit_analysis_result(commit, result):
     commit.score_reason = validated_result["score_reason"]
 
     return commit
+
+# ==========================================
+# Gemini LLM API 호출 Helper 함수
+# ==========================================
+COMMIT_ANALYSIS_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "commit_summary": {
+            "type": ["string", "null"],
+            "description": "Korean one-sentence summary of the commit change"
+        },
+        "commit_backend_score": {
+            "type": ["number", "null"],
+            "description": "Backend code quality score from 0 to 100, or null if not applicable"
+        },
+        "analysis_status": {
+            "type": "string",
+            "enum": ["success", "skipped", "large_diff_pending", "failed"],
+            "description": "Commit analysis status"
+        },
+        "score_reason": {
+            "type": "string",
+            "description": "Short Korean reason for the score or status"
+        }
+    },
+    "required": [
+        "commit_summary",
+        "commit_backend_score",
+        "analysis_status",
+        "score_reason"
+    ],
+    "additionalProperties": False
+}
+
+
+def build_safe_commit_input_for_llm(commit_input):
+    """LLM 호출 직전 Diff 길이를 한 번 더 제한하여 비용 폭발 방지"""
+    safe_commit_input = dict(commit_input)
+    diff_text = safe_commit_input.get("diff_text") or ""
+
+    if len(diff_text) > MAX_DIFF_CHARS:
+        safe_commit_input["diff_text"] = diff_text[:MAX_DIFF_CHARS]
+        safe_commit_input["diff_truncated"] = True
+
+    return safe_commit_input
+
+
+def extract_text_from_gemini_response(response_json):
+    """Gemini 응답 JSON에서 모델이 생성한 텍스트 추출"""
+    try:
+        return response_json["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError("Gemini 응답에서 텍스트를 추출할 수 없습니다.") from e
+
+
+def parse_llm_json_response(response_text):
+    """LLM 응답 텍스트를 JSON 객체로 파싱"""
+    if not response_text or not response_text.strip():
+        raise ValueError("LLM 응답이 비어 있습니다.")
+
+    cleaned_text = response_text.strip()
+
+    # JSON mode를 사용하더라도 예외적으로 코드펜스가 섞일 가능성에 대비
+    if cleaned_text.startswith("```"):
+        cleaned_text = cleaned_text.strip("`").strip()
+        if cleaned_text.startswith("json"):
+            cleaned_text = cleaned_text[4:].strip()
+
+    try:
+        return json.loads(cleaned_text)
+    except json.JSONDecodeError as e:
+        raise ValueError("LLM 응답을 JSON으로 파싱할 수 없습니다.") from e
+
+
+def call_llm_for_commit_analysis(commit_input):
+    """Gemini API를 호출하여 code_like 커밋의 분석 결과 JSON 생성"""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.")
+
+    safe_commit_input = build_safe_commit_input_for_llm(commit_input)
+    user_prompt = build_commit_analysis_user_prompt(safe_commit_input)
+
+    payload = {
+        "systemInstruction": {
+            "parts": [
+                {
+                    "text": COMMIT_ANALYSIS_SYSTEM_PROMPT
+                }
+            ]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": user_prompt
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 512,
+            "responseFormat": {
+                "text": {
+                    "mimeType": "application/json",
+                    "schema": COMMIT_ANALYSIS_RESPONSE_SCHEMA
+                }
+            }
+        }
+    }
+
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.post(
+            GEMINI_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        error_message = ""
+        if "response" in locals() and response is not None:
+            error_message = response.text[:500]
+        raise RuntimeError(f"Gemini API 호출에 실패했습니다. {error_message}") from e
+
+    response_json = response.json()
+    response_text = extract_text_from_gemini_response(response_json)
+    parsed_result = parse_llm_json_response(response_text)
+
+    return validate_commit_analysis_result(parsed_result)
 
 # ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
@@ -1349,7 +1490,8 @@ def get_analysis_estimate(project_id):
 def analyze_static_code(project_id):
     """
     저장된 커밋 Diff를 기준으로 정적 코드 분석 결과를 CommitDetail에 반영하는 API
-    현재 버전은 LLM 호출 없이 정책 기반으로 처리 가능한 커밋만 저장
+    use_llm=false: 정책 기반으로 처리 가능한 커밋만 저장
+    use_llm=true: code_like 커밋도 Gemini API로 분석하되, smoke test 단계에서는 limit 필수
     """
     project = Project.query.get(project_id)
     if not project:
@@ -1357,6 +1499,7 @@ def analyze_static_code(project_id):
 
     request_data = request.get_json(silent=True) or {}
     force = bool(request_data.get("force", False))
+    use_llm = bool(request_data.get("use_llm", False))
     limit = request_data.get("limit")
 
     if limit is not None:
@@ -1366,6 +1509,16 @@ def analyze_static_code(project_id):
                 return jsonify({"error": "limit은 0 이상이어야 합니다."}), 400
         except ValueError:
             return jsonify({"error": "limit은 정수여야 합니다."}), 400
+
+    # LLM 호출은 비용과 rate limit이 있으므로 smoke test 단계에서는 limit을 필수로 요구
+    if use_llm and limit is None:
+        return jsonify({
+            "error": "use_llm=true 테스트에서는 안전을 위해 limit을 반드시 지정해야 합니다.",
+            "recommended_body": {
+                "use_llm": True,
+                "limit": 1
+            }
+        }), 400
 
     query = CommitDetail.query.filter_by(project_id=project.id)
 
@@ -1380,6 +1533,7 @@ def analyze_static_code(project_id):
 
     total_targets = len(commits)
     policy_processed_count = 0
+    llm_processed_count = 0
     code_like_pending_count = 0
     skipped_count = 0
     large_diff_pending_count = 0
@@ -1391,17 +1545,57 @@ def analyze_static_code(project_id):
         classification = classify_commit_for_analysis(commit)
         estimated_type = classification["estimated_type"]
 
-        # code_like는 실제 LLM API 연결 이후 분석할 대상이므로 현재 단계에서는 저장하지 않음
         analysis_result = build_policy_based_analysis_result(commit, classification)
 
+        # code_like는 정책 기반 결과가 없으므로, use_llm=true일 때만 Gemini로 분석
         if analysis_result is None:
-            code_like_pending_count += 1
-            analyzed_commits.append({
-                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
-                "estimated_type": estimated_type,
-                "analysis_status": None,
-                "action": "llm_required"
-            })
+            if not use_llm:
+                code_like_pending_count += 1
+                analyzed_commits.append({
+                    "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                    "estimated_type": estimated_type,
+                    "analysis_status": None,
+                    "action": "llm_required"
+                })
+                continue
+
+            try:
+                commit_input = build_commit_input(commit)
+                llm_result = call_llm_for_commit_analysis(commit_input)
+                save_commit_analysis_result(commit, llm_result)
+
+                llm_processed_count += 1
+
+                if llm_result["analysis_status"] == "skipped":
+                    skipped_count += 1
+                elif llm_result["analysis_status"] == "large_diff_pending":
+                    large_diff_pending_count += 1
+                elif llm_result["analysis_status"] == "failed":
+                    failed_count += 1
+
+                analyzed_commits.append({
+                    "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                    "estimated_type": estimated_type,
+                    "analysis_status": llm_result["analysis_status"],
+                    "commit_backend_score": llm_result["commit_backend_score"],
+                    "action": "llm_saved"
+                })
+
+            except Exception as e:
+                commit.commit_summary = "LLM 커밋 분석 중 오류가 발생함."
+                commit.commit_backend_score = None
+                commit.analysis_status = "failed"
+                commit.score_reason = "LLM API 호출 또는 응답 저장 중 오류가 발생함."
+
+                failed_count += 1
+                analyzed_commits.append({
+                    "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                    "estimated_type": estimated_type,
+                    "analysis_status": "failed",
+                    "action": "llm_failed",
+                    "error": str(e)[:300]
+                })
+
             continue
 
         try:
@@ -1419,10 +1613,10 @@ def analyze_static_code(project_id):
                 "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
                 "estimated_type": estimated_type,
                 "analysis_status": analysis_result["analysis_status"],
-                "action": "saved"
+                "action": "policy_saved"
             })
 
-        except Exception:
+        except Exception as e:
             commit.commit_summary = "커밋 분석 결과 저장 중 오류가 발생함."
             commit.commit_backend_score = None
             commit.analysis_status = "failed"
@@ -1433,7 +1627,8 @@ def analyze_static_code(project_id):
                 "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
                 "estimated_type": estimated_type,
                 "analysis_status": "failed",
-                "action": "failed"
+                "action": "policy_failed",
+                "error": str(e)[:300]
             })
 
     db.session.commit()
@@ -1442,16 +1637,18 @@ def analyze_static_code(project_id):
         "status": "success",
         "project_id": project.id,
         "project_name": project.name,
-        "mode": "policy_based_only",
+        "mode": "llm_enabled" if use_llm else "policy_based_only",
         "force": force,
+        "use_llm": use_llm,
         "limit": limit,
         "total_targets": total_targets,
         "policy_processed_count": policy_processed_count,
+        "llm_processed_count": llm_processed_count,
         "code_like_pending_count": code_like_pending_count,
         "skipped_count": skipped_count,
         "large_diff_pending_count": large_diff_pending_count,
         "failed_count": failed_count,
-        "message": "LLM 호출 없이 정책 기반으로 처리 가능한 커밋 분석 결과를 저장했습니다.",
+        "message": "커밋 정적 분석 결과를 저장했습니다.",
         "analyzed_commits": analyzed_commits[:20]
     })
 
