@@ -77,6 +77,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+MAX_LLM_ANALYSIS_LIMIT = 20
 
 # ==========================================
 # LLM 분석 비용/토큰 추정용 설정값
@@ -1569,7 +1570,7 @@ def get_analysis_estimate(project_id):
             total_output_tokens_all += output_tokens
 
             # 문서/설정 전용 및 포맷팅 전용 커밋은 코드 품질 점수 대상에서 제외될 가능성이 높다고 보고 별도 추정
-            if commit_type not in ("doc_or_config_only", "format_only", "env_or_url_only"):
+            if commit_type not in ("doc_or_config_only", "doc_or_config_heavy", "format_only", "env_or_url_only"):
                 total_input_tokens_code_like += input_tokens
                 total_output_tokens_code_like += output_tokens
 
@@ -1667,6 +1668,7 @@ def analyze_static_code(project_id):
     force = bool(request_data.get("force", False))
     use_llm = bool(request_data.get("use_llm", False))
     limit = request_data.get("limit")
+    commit_hash_prefix = (request_data.get("commit_hash_prefix") or "").strip()
 
     if limit is not None:
         try:
@@ -1675,6 +1677,13 @@ def analyze_static_code(project_id):
                 return jsonify({"error": "limit은 0 이상이어야 합니다."}), 400
         except ValueError:
             return jsonify({"error": "limit은 정수여야 합니다."}), 400
+
+    if commit_hash_prefix:
+        if len(commit_hash_prefix) < 7:
+            return jsonify({"error": "commit_hash_prefix는 최소 7자 이상이어야 합니다."}), 400
+
+        if not all(char in "0123456789abcdefABCDEF" for char in commit_hash_prefix):
+            return jsonify({"error": "commit_hash_prefix는 16진수 해시 문자만 사용할 수 있습니다."}), 400
 
     # LLM 호출은 비용과 rate limit이 있으므로 smoke test 단계에서는 limit을 필수로 요구
     if use_llm and limit is None:
@@ -1686,7 +1695,19 @@ def analyze_static_code(project_id):
             }
         }), 400
 
+    if use_llm and limit > MAX_LLM_ANALYSIS_LIMIT:
+        return jsonify({
+            "error": f"use_llm=true에서는 limit을 최대 {MAX_LLM_ANALYSIS_LIMIT}까지만 허용합니다.",
+            "recommended_body": {
+                "use_llm": True,
+                "limit": min(MAX_LLM_ANALYSIS_LIMIT, limit)
+            }
+        }), 400
+
     query = CommitDetail.query.filter_by(project_id=project.id)
+
+    if commit_hash_prefix:
+        query = query.filter(CommitDetail.commit_hash.ilike(f"{commit_hash_prefix}%"))
 
     # force=false인 경우 아직 분석 결과가 없는 커밋만 처리
     if not force:
@@ -1807,6 +1828,7 @@ def analyze_static_code(project_id):
         "force": force,
         "use_llm": use_llm,
         "limit": limit,
+        "commit_hash_prefix": commit_hash_prefix or None,
         "total_targets": total_targets,
         "policy_processed_count": policy_processed_count,
         "llm_processed_count": llm_processed_count,
