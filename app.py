@@ -497,6 +497,171 @@ Commit input:
 """
 
 # ==========================================
+# LLM 분석 결과 처리 Helper 함수
+# ==========================================
+VALID_ANALYSIS_STATUSES = (
+    "success",
+    "skipped",
+    "large_diff_pending",
+    "failed"
+)
+
+
+def get_commit_message_title(commit):
+    """커밋 메시지의 첫 줄만 안전하게 추출"""
+    if not commit.message:
+        return ""
+
+    return commit.message.splitlines()[0].strip()
+
+
+def build_policy_based_summary(commit, classification):
+    """LLM 호출 없이 커밋 유형별 보수적 요약 생성"""
+    estimated_type = classification["estimated_type"]
+    message_title = get_commit_message_title(commit)
+    changed_files = classification["changed_files"]
+    changed_file_text = ", ".join(changed_files[:3])
+
+    if estimated_type == "empty_diff":
+        return "Diff가 제공되지 않아 커밋 메시지를 기준으로 변경 내용을 보수적으로 요약함."
+
+    if estimated_type == "format_only":
+        lower_message = (commit.message or "").lower()
+
+        if "black" in lower_message:
+            return "Black formatter를 적용해 코드 스타일과 관련 설정을 일괄 정리함."
+
+        if "prettier" in lower_message:
+            return "Prettier를 적용해 코드 스타일과 포맷팅을 일괄 정리함."
+
+        return "코드 포맷팅 및 스타일 정리 중심의 변경을 적용함."
+
+    if estimated_type == "doc_or_config_only":
+        return "문서 또는 설정 파일 중심으로 프로젝트 설명과 환경 구성을 정리함."
+
+    if estimated_type == "doc_or_config_heavy":
+        return "문서와 설정 중심 변경이며 일부 코드 파일의 문서화 요소를 함께 정리함."
+
+    if estimated_type == "large_code_diff":
+        lower_message = (commit.message or "").lower()
+        lower_files = " ".join(changed_files).lower()
+
+        if "timezone" in lower_message or "timezone" in lower_files or "dst" in lower_message:
+            return "타임존 및 DST 처리 로직과 관련 테스트가 크게 변경된 대형 커밋임."
+
+        if "test" in lower_message or "test" in lower_files:
+            return "코드 로직과 관련 테스트가 크게 변경된 대형 커밋임."
+
+        return "코드 중심 변경 규모가 커 별도 분석이 필요한 대형 커밋임."
+
+    if message_title:
+        return f"{message_title} 커밋의 변경 내용을 보수적으로 요약함."
+
+    if changed_file_text:
+        return f"{changed_file_text} 등 변경 파일을 기준으로 커밋 내용을 보수적으로 요약함."
+
+    return "제공된 커밋 정보를 기준으로 변경 내용을 보수적으로 요약함."
+
+
+def build_policy_based_analysis_result(commit, classification=None):
+    """LLM 호출 없이 정책 기반으로 처리 가능한 커밋 분석 결과 생성"""
+    if classification is None:
+        classification = classify_commit_for_analysis(commit)
+
+    estimated_type = classification["estimated_type"]
+
+    if estimated_type == "code_like":
+        return None
+
+    commit_summary = build_policy_based_summary(commit, classification)
+
+    if estimated_type == "empty_diff":
+        analysis_status = "skipped"
+        score_reason = "Diff가 없어 백엔드 코드 품질 점수 산정에서 제외함."
+    elif estimated_type == "format_only":
+        analysis_status = "skipped"
+        score_reason = "포맷팅 중심 변경으로 코드 품질 점수 산정에서 제외함."
+    elif estimated_type in ("doc_or_config_only", "doc_or_config_heavy"):
+        analysis_status = "skipped"
+        score_reason = "문서/설정 중심 변경으로 코드 품질 점수 산정에서 제외함."
+    elif estimated_type == "large_code_diff":
+        analysis_status = "large_diff_pending"
+        score_reason = "대형 코드 diff로 일반 단일 분석 방식에서는 점수 산정을 보류함."
+    else:
+        analysis_status = "failed"
+        score_reason = "알 수 없는 커밋 유형으로 분석 결과를 안전하게 생성할 수 없음."
+
+    return {
+        "commit_summary": commit_summary,
+        "commit_backend_score": None,
+        "analysis_status": analysis_status,
+        "score_reason": score_reason
+    }
+
+
+def validate_commit_analysis_result(result):
+    """커밋 분석 결과 JSON이 저장 가능한 형태인지 검증하고 필요한 값만 정리"""
+    if not isinstance(result, dict):
+        raise ValueError("커밋 분석 결과가 dict 형식이 아닙니다.")
+
+    required_fields = (
+        "commit_summary",
+        "commit_backend_score",
+        "analysis_status",
+        "score_reason"
+    )
+
+    for field in required_fields:
+        if field not in result:
+            raise ValueError(f"커밋 분석 결과에 {field} 필드가 없습니다.")
+
+    commit_summary = result["commit_summary"]
+    commit_backend_score = result["commit_backend_score"]
+    analysis_status = result["analysis_status"]
+    score_reason = result["score_reason"]
+
+    if commit_summary is not None and not isinstance(commit_summary, str):
+        raise ValueError("commit_summary는 문자열 또는 null이어야 합니다.")
+
+    if analysis_status not in VALID_ANALYSIS_STATUSES:
+        raise ValueError(f"analysis_status 값이 허용되지 않습니다: {analysis_status}")
+
+    if not isinstance(score_reason, str):
+        raise ValueError("score_reason은 문자열이어야 합니다.")
+
+    if commit_backend_score is not None:
+        if not isinstance(commit_backend_score, (int, float)):
+            raise ValueError("commit_backend_score는 숫자 또는 null이어야 합니다.")
+
+        if commit_backend_score < 0 or commit_backend_score > 100:
+            raise ValueError("commit_backend_score는 0 이상 100 이하이어야 합니다.")
+
+    if analysis_status == "success" and commit_backend_score is None:
+        raise ValueError("success 상태에서는 commit_backend_score가 필요합니다.")
+
+    if analysis_status != "success" and commit_backend_score is not None:
+        raise ValueError("success가 아닌 상태에서는 commit_backend_score가 null이어야 합니다.")
+
+    return {
+        "commit_summary": commit_summary,
+        "commit_backend_score": commit_backend_score,
+        "analysis_status": analysis_status,
+        "score_reason": score_reason
+    }
+
+
+def save_commit_analysis_result(commit, result):
+    """검증된 커밋 분석 결과를 CommitDetail row에 반영"""
+    validated_result = validate_commit_analysis_result(result)
+
+    commit.commit_summary = validated_result["commit_summary"]
+    commit.commit_backend_score = validated_result["commit_backend_score"]
+    commit.analysis_status = validated_result["analysis_status"]
+    commit.score_reason = validated_result["score_reason"]
+
+    return commit
+
+# ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
 # ==========================================
 
@@ -556,7 +721,7 @@ class CommitDetail(db.Model):
 
     diff_text = db.Column(db.Text, nullable=True)                        # 코드 변경 사항 원본 텍스트(Diff)
     commit_summary = db.Column(db.Text, nullable=True)                   # Diff 기반 커밋 내용 요약
-    analysis_status = db.Column(db.String(30), nullable=True)            # 커밋 분석 상태(success, skipped, failed 등)
+    analysis_status = db.Column(db.String(30), nullable=True)            # 커밋 분석 상태(success, skipped, large_diff_pending, failed)
     score_reason = db.Column(db.Text, nullable=True)                     # 백엔드 코드 점수 산정 근거
 
 # 테이블 5: PR 상세 데이터 (PullRequestDetail) - AI 문맥 분석용 Deep Data
@@ -1175,6 +1340,119 @@ def get_analysis_estimate(project_id):
             "large_code_diff 커밋은 앞부분만 보고 점수를 단정하지 않고, 추후 chunk 분석 또는 별도 분석 대상으로 분리하는 것이 안전합니다.",
             "실제 비용은 모델, 프롬프트 길이, 출력 길이, 캐시 여부에 따라 달라질 수 있습니다."
         ]
+    })
+
+# ==========================================
+# 5.4. 프로젝트 정적 코드 분석 요청 API 라우터 (POST)
+# ==========================================
+@app.route('/api/projects/<int:project_id>/analyze-static-code', methods=['POST'])
+def analyze_static_code(project_id):
+    """
+    저장된 커밋 Diff를 기준으로 정적 코드 분석 결과를 CommitDetail에 반영하는 API
+    현재 버전은 LLM 호출 없이 정책 기반으로 처리 가능한 커밋만 저장
+    """
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({"error": "해당 프로젝트를 찾을 수 없습니다."}), 404
+
+    request_data = request.get_json(silent=True) or {}
+    force = bool(request_data.get("force", False))
+    limit = request_data.get("limit")
+
+    if limit is not None:
+        try:
+            limit = int(limit)
+            if limit < 0:
+                return jsonify({"error": "limit은 0 이상이어야 합니다."}), 400
+        except ValueError:
+            return jsonify({"error": "limit은 정수여야 합니다."}), 400
+
+    query = CommitDetail.query.filter_by(project_id=project.id)
+
+    # force=false인 경우 아직 분석 결과가 없는 커밋만 처리
+    if not force:
+        query = query.filter(CommitDetail.analysis_status.is_(None))
+
+    commits = query.order_by(CommitDetail.committed_at.asc()).all()
+
+    if limit is not None:
+        commits = commits[:limit]
+
+    total_targets = len(commits)
+    policy_processed_count = 0
+    code_like_pending_count = 0
+    skipped_count = 0
+    large_diff_pending_count = 0
+    failed_count = 0
+
+    analyzed_commits = []
+
+    for commit in commits:
+        classification = classify_commit_for_analysis(commit)
+        estimated_type = classification["estimated_type"]
+
+        # code_like는 실제 LLM API 연결 이후 분석할 대상이므로 현재 단계에서는 저장하지 않음
+        analysis_result = build_policy_based_analysis_result(commit, classification)
+
+        if analysis_result is None:
+            code_like_pending_count += 1
+            analyzed_commits.append({
+                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                "estimated_type": estimated_type,
+                "analysis_status": None,
+                "action": "llm_required"
+            })
+            continue
+
+        try:
+            save_commit_analysis_result(commit, analysis_result)
+            policy_processed_count += 1
+
+            if analysis_result["analysis_status"] == "skipped":
+                skipped_count += 1
+            elif analysis_result["analysis_status"] == "large_diff_pending":
+                large_diff_pending_count += 1
+            elif analysis_result["analysis_status"] == "failed":
+                failed_count += 1
+
+            analyzed_commits.append({
+                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                "estimated_type": estimated_type,
+                "analysis_status": analysis_result["analysis_status"],
+                "action": "saved"
+            })
+
+        except Exception:
+            commit.commit_summary = "커밋 분석 결과 저장 중 오류가 발생함."
+            commit.commit_backend_score = None
+            commit.analysis_status = "failed"
+            commit.score_reason = "정책 기반 분석 결과 저장 중 오류가 발생함."
+
+            failed_count += 1
+            analyzed_commits.append({
+                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                "estimated_type": estimated_type,
+                "analysis_status": "failed",
+                "action": "failed"
+            })
+
+    db.session.commit()
+
+    return jsonify({
+        "status": "success",
+        "project_id": project.id,
+        "project_name": project.name,
+        "mode": "policy_based_only",
+        "force": force,
+        "limit": limit,
+        "total_targets": total_targets,
+        "policy_processed_count": policy_processed_count,
+        "code_like_pending_count": code_like_pending_count,
+        "skipped_count": skipped_count,
+        "large_diff_pending_count": large_diff_pending_count,
+        "failed_count": failed_count,
+        "message": "LLM 호출 없이 정책 기반으로 처리 가능한 커밋 분석 결과를 저장했습니다.",
+        "analyzed_commits": analyzed_commits[:20]
     })
 
 # ==========================================
