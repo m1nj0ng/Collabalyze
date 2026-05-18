@@ -271,6 +271,30 @@ PACKAGE_METADATA_MAX_LOC_CHANGE = 80
 PACKAGE_METADATA_MAX_DIFF_CHARS = 6000
 PACKAGE_METADATA_MAX_FILES = 6
 
+# 테스트 코드만 변경된 커밋을 구분하기 위한 보수적 기준
+TEST_ONLY_MAX_CHANGED_LINES = 120
+TEST_ONLY_MAX_LOC_CHANGE = 120
+TEST_ONLY_MAX_DIFF_CHARS = 8000
+TEST_ONLY_MAX_FILES = 8
+
+# 주석/문서화 라인만 변경된 코드 파일 커밋을 구분하기 위한 보수적 기준
+COMMENT_OR_DOCSTRING_ONLY_MESSAGE_PHRASES = (
+    'comment',
+    'comments',
+    'docstring',
+    'docstrings',
+    'documentation',
+    'add docs',
+    'update docs',
+    '주석',
+    '설명 주석'
+)
+
+COMMENT_OR_DOCSTRING_ONLY_MAX_CHANGED_LINES = 80
+COMMENT_OR_DOCSTRING_ONLY_MAX_LOC_CHANGE = 80
+COMMENT_OR_DOCSTRING_ONLY_MAX_DIFF_CHARS = 5000
+COMMENT_OR_DOCSTRING_ONLY_MAX_FILES = 5
+
 # ==========================================
 # LLM 분석 공통 Helper 함수
 # ==========================================
@@ -357,6 +381,24 @@ def has_structural_code_change(changed_lines):
     changed_text = "\n".join(changed_lines).lower()
     return any(pattern in changed_text for pattern in STRUCTURAL_CODE_PATTERNS)
 
+def is_comment_or_docstring_like_line(line):
+    """추가/삭제 라인이 주석 또는 docstring 라인처럼 보이는지 판별"""
+    stripped = (line or "").strip()
+
+    if not stripped:
+        return True
+
+    if stripped.startswith("#"):
+        return True
+
+    if stripped.startswith('"""') or stripped.startswith("'''"):
+        return True
+
+    if stripped.endswith('"""') or stripped.endswith("'''"):
+        return True
+
+    return False
+
 def is_env_or_url_only_commit(commit, changed_files, diff_chars):
     """단순 URL/환경값 변경 중심 커밋인지 보수적으로 판별"""
     message = (commit.message or "").lower()
@@ -401,6 +443,19 @@ def is_env_or_url_only_commit(commit, changed_files, diff_chars):
         return False
 
     return True
+
+def is_test_file(filename):
+    """테스트 파일인지 보수적으로 판별"""
+    normalized = (filename or "").replace("\\", "/").lower()
+    basename = os.path.basename(normalized)
+
+    return (
+        normalized.startswith("tests/")
+        or "/tests/" in normalized
+        or basename.startswith("test_")
+        or basename.endswith("_test.py")
+        or basename.endswith("test.py")
+    )
 
 def is_package_metadata_file(filename):
     """패키지 배포 메타데이터 파일인지 판별"""
@@ -467,6 +522,86 @@ def is_package_metadata_only_commit(commit, changed_files, diff_chars):
 
     return True
 
+def is_test_only_commit(commit, changed_files, diff_chars):
+    """테스트 코드만 변경된 커밋인지 보수적으로 판별"""
+    diff_text = commit.diff_text or ""
+
+    if not diff_text.strip():
+        return False
+
+    if not changed_files:
+        return False
+
+    if len(changed_files) > TEST_ONLY_MAX_FILES:
+        return False
+
+    if not all(
+        is_test_file(filename) or is_doc_or_config_file(filename)
+        for filename in changed_files
+    ):
+        return False
+
+    loc_changed = (commit.loc_added or 0) + (commit.loc_deleted or 0)
+    if loc_changed > TEST_ONLY_MAX_LOC_CHANGE:
+        return False
+
+    if diff_chars > TEST_ONLY_MAX_DIFF_CHARS:
+        return False
+
+    changed_lines = get_diff_changed_lines(diff_text)
+    if len(changed_lines) > TEST_ONLY_MAX_CHANGED_LINES:
+        return False
+
+    return True
+
+def is_comment_or_docstring_only_commit(commit, changed_files, diff_chars):
+    """코드 파일에서 주석/docstring만 변경된 커밋인지 보수적으로 판별"""
+    message = (commit.message or "").lower()
+    diff_text = commit.diff_text or ""
+
+    if not diff_text.strip():
+        return False
+
+    if not changed_files:
+        return False
+
+    if len(changed_files) > COMMENT_OR_DOCSTRING_ONLY_MAX_FILES:
+        return False
+
+    # 문서/설정 파일만 바뀐 경우는 기존 doc_or_config_only가 처리하게 둔다.
+    # 여기서는 .py 같은 코드 파일의 주석/docstring 변경을 잡는다.
+    if all(is_doc_or_config_file(filename) for filename in changed_files):
+        return False
+
+    loc_changed = (commit.loc_added or 0) + (commit.loc_deleted or 0)
+    if loc_changed > COMMENT_OR_DOCSTRING_ONLY_MAX_LOC_CHANGE:
+        return False
+
+    if diff_chars > COMMENT_OR_DOCSTRING_ONLY_MAX_DIFF_CHARS:
+        return False
+
+    changed_lines = get_diff_changed_lines(diff_text)
+    if not changed_lines:
+        return False
+
+    if len(changed_lines) > COMMENT_OR_DOCSTRING_ONLY_MAX_CHANGED_LINES:
+        return False
+
+    message_has_comment_phrase = any(
+        phrase in message
+        for phrase in COMMENT_OR_DOCSTRING_ONLY_MESSAGE_PHRASES
+    )
+
+    # 모든 변경 라인이 명확히 주석/docstring 형태면 메시지와 무관하게 인정
+    if all(is_comment_or_docstring_like_line(line) for line in changed_lines):
+        return True
+
+    # 메시지가 주석/문서화 중심이어도 실제 코드 구조 변경이 보이면 제외
+    if message_has_comment_phrase and not has_structural_code_change(changed_lines):
+        return True
+
+    return False
+
 def classify_commit_for_analysis(commit):
     """커밋 Diff와 메타데이터를 기준으로 LLM 분석용 커밋 유형을 분류"""
     diff_text = commit.diff_text or ""
@@ -489,6 +624,10 @@ def classify_commit_for_analysis(commit):
         estimated_type = "env_or_url_only"
     elif is_package_metadata_only_commit(commit, changed_files, diff_chars):
         estimated_type = "package_metadata_only"
+    elif is_test_only_commit(commit, changed_files, diff_chars):
+        estimated_type = "test_only"
+    elif is_comment_or_docstring_only_commit(commit, changed_files, diff_chars):
+        estimated_type = "comment_or_docstring_only"    
     elif file_count > 0 and doc_or_config_file_count == file_count:
         estimated_type = "doc_or_config_only"
     elif file_count > 0 and (doc_or_config_file_count / file_count) >= 0.7:
@@ -608,6 +747,7 @@ Field rules:
 - Do not give a default score such as 70 when evidence is insufficient.
 - Do not score documentation-only, config-only, formatting-only, empty-diff, or large-code-diff-pending commits.
 - Do not assign a partial or approximate score based only on a visible or truncated part of a large diff.
+- Do not score test-only or comment/docstring-only commits in v1.
 
 3. analysis_status
 Use only one of these four values:
@@ -684,6 +824,21 @@ Do not invent missing information.
 - analysis_status: "skipped".
 - score_reason: explain that package metadata changes are excluded from backend code-quality scoring.
 - Do not assign a numeric score only because the change appears in a Python file such as setup.py.
+
+4-3. test_only
+- Treat commits that only change test files as outside runtime backend code-quality scoring in v1.
+- commit_summary: summarize the test addition or update.
+- commit_backend_score: null.
+- analysis_status: "skipped".
+- score_reason: explain that test-only changes are excluded from runtime backend code-quality scoring.
+- Do not treat test-only work as low-quality code; it is valid contribution but outside this score.
+
+4-4. comment_or_docstring_only
+- Treat commits that only add or update comments/docstrings as outside backend code-quality scoring.
+- commit_summary: summarize the documentation/comment improvement.
+- commit_backend_score: null.
+- analysis_status: "skipped".
+- score_reason: explain that comment/docstring-only changes are excluded from backend code-quality scoring.
 
 5. code_like
 - Analyze the provided diff.
@@ -851,6 +1006,12 @@ def build_policy_based_summary(commit, classification):
     
     if estimated_type == "package_metadata_only":
         return "패키지 버전 또는 배포 메타데이터를 갱신함."
+    
+    if estimated_type == "test_only":
+        return "테스트 코드만 변경되어 백엔드 코드 품질 점수 산정에서 제외함."
+
+    if estimated_type == "comment_or_docstring_only":
+        return "주석 또는 docstring 중심 변경으로 코드 문서화를 보강함."
 
     if estimated_type == "doc_or_config_only":
         return "문서 또는 설정 파일 중심으로 프로젝트 설명과 환경 구성을 정리함."
@@ -903,6 +1064,12 @@ def build_policy_based_analysis_result(commit, classification=None):
     elif estimated_type == "package_metadata_only":
         analysis_status = "skipped"
         score_reason = "패키지 메타데이터 변경으로 코드 품질 점수 산정에서 제외함."
+    elif estimated_type == "test_only":
+        analysis_status = "skipped"
+        score_reason = "테스트 코드 전용 변경으로 런타임 코드 품질 점수 산정에서 제외함."
+    elif estimated_type == "comment_or_docstring_only":
+        analysis_status = "skipped"
+        score_reason = "주석/docstring 중심 변경으로 코드 품질 점수 산정에서 제외함."    
     elif estimated_type in ("doc_or_config_only", "doc_or_config_heavy"):
         analysis_status = "skipped"
         score_reason = "문서/설정 중심 변경으로 코드 품질 점수 산정에서 제외함."
@@ -1022,6 +1189,8 @@ def validate_commit_analysis_result(result, expected_type=None):
         "format_only",
         "env_or_url_only",
         "package_metadata_only",
+        "test_only",
+        "comment_or_docstring_only",
         "doc_or_config_only",
         "doc_or_config_heavy"
     ) and analysis_status != "skipped":
@@ -1852,6 +2021,8 @@ def get_analysis_estimate(project_id):
     format_only_commits = 0
     env_or_url_only_commits = 0
     package_metadata_only_commits = 0
+    test_only_commits = 0
+    comment_or_docstring_only_commits = 0
     code_like_commits = 0
     large_code_diff_commits = 0
     largest_diff_chars = 0
@@ -1887,6 +2058,10 @@ def get_analysis_estimate(project_id):
                 env_or_url_only_commits += 1
             elif commit_type == "package_metadata_only":
                 package_metadata_only_commits += 1
+            elif commit_type == "test_only":
+                test_only_commits += 1
+            elif commit_type == "comment_or_docstring_only":
+                comment_or_docstring_only_commits += 1
             elif commit_type == "doc_or_config_only":
                 doc_or_config_only_commits += 1
             elif commit_type == "doc_or_config_heavy":
@@ -1903,7 +2078,15 @@ def get_analysis_estimate(project_id):
             total_output_tokens_all += output_tokens
 
             # 문서/설정 전용 및 포맷팅 전용 커밋은 코드 품질 점수 대상에서 제외될 가능성이 높다고 보고 별도 추정
-            if commit_type not in ("doc_or_config_only", "doc_or_config_heavy", "format_only", "env_or_url_only", "package_metadata_only"):
+            if commit_type not in (
+                "doc_or_config_only",
+                "doc_or_config_heavy",
+                "format_only",
+                "env_or_url_only",
+                "package_metadata_only",
+                "test_only",
+                "comment_or_docstring_only"
+            ):
                 total_input_tokens_code_like += input_tokens
                 total_output_tokens_code_like += output_tokens
 
@@ -1947,6 +2130,8 @@ def get_analysis_estimate(project_id):
             "format_only_commits": format_only_commits,
             "env_or_url_only_commits": env_or_url_only_commits,
             "package_metadata_only_commits": package_metadata_only_commits,
+            "test_only_commits": test_only_commits,
+            "comment_or_docstring_only_commits": comment_or_docstring_only_commits,
             "doc_or_config_only_commits": doc_or_config_only_commits,
             "doc_or_config_heavy_commits": doc_or_config_heavy_commits
         },
@@ -1977,7 +2162,7 @@ def get_analysis_estimate(project_id):
         "notes": [
             "이 API는 실제 LLM을 호출하지 않습니다.",
             "비용은 diff_text 길이와 고정 출력 토큰 수를 기반으로 한 보수적 추정치입니다.",
-            "문서/설정, 포맷팅, 환경값/URL, 패키지 메타데이터 중심 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
+            "문서/설정, 포맷팅, 환경값/URL, 패키지 메타데이터, 테스트 전용, 주석/docstring 중심 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
             "diff_truncated가 true인 커밋은 실제 분석 시 제공되지 않은 Diff 뒷부분을 추측하지 않도록 제한해야 합니다.",
             "large_code_diff 커밋은 앞부분만 보고 점수를 단정하지 않고, 추후 chunk 분석 또는 별도 분석 대상으로 분리하는 것이 안전합니다.",
             "실제 비용은 모델, 프롬프트 길이, 출력 길이, 캐시 여부에 따라 달라질 수 있습니다."
