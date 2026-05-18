@@ -536,6 +536,14 @@ def is_test_only_commit(commit, changed_files, diff_chars):
     if len(changed_files) > TEST_ONLY_MAX_FILES:
         return False
 
+    has_test_file = any(
+        is_test_file(filename)
+        for filename in changed_files
+    )
+
+    if not has_test_file:
+        return False
+
     if not all(
         is_test_file(filename) or is_doc_or_config_file(filename)
         for filename in changed_files
