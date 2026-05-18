@@ -127,6 +127,7 @@ DOC_OR_CONFIG_EXTENSIONS = (
     '.md', '.txt', '.rst',
     '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico',
     '.json', '.csv', '.yml', '.yaml',
+    '.ini', '.cfg', '.toml',
     '.lock'
 )
 
