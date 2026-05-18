@@ -72,11 +72,22 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
 
+# LLM API 호출용 설정
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+
 # Gemini API 호출용 설정
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+# OpenAI API 호출용 설정
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+OPENAI_API_URL = "https://api.openai.com/v1/responses"
+
 MAX_LLM_ANALYSIS_LIMIT = 20
+SCORE_REASON_MAX_CHARS = 90
+OPENAI_MAX_OUTPUT_TOKENS = 900
 
 # ==========================================
 # LLM 분석 비용/토큰 추정용 설정값
@@ -116,6 +127,7 @@ DOC_OR_CONFIG_EXTENSIONS = (
     '.md', '.txt', '.rst',
     '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico',
     '.json', '.csv', '.yml', '.yaml',
+    '.ini', '.cfg', '.toml',
     '.lock'
 )
 
@@ -124,6 +136,7 @@ DOC_OR_CONFIG_FILENAMES = (
     'Dockerfile',
     'README',
     'LICENSE',
+    'HISTORY',
     'CHANGELOG',
     'CONTRIBUTING',
     'CODE_OF_CONDUCT',
@@ -136,6 +149,7 @@ DOC_OR_CONFIG_FILENAMES = (
 DOC_OR_CONFIG_BASENAME_PREFIXES = (
     'readme',
     'license',
+    'history',
     'changelog',
     'contributing',
     'code_of_conduct',
@@ -221,7 +235,8 @@ STRUCTURAL_CODE_PATTERNS = (
 PACKAGE_METADATA_FILES = (
     'setup.py',
     'setup.cfg',
-    'pyproject.toml'
+    'pyproject.toml',
+    'manifest.in'
 )
 
 PACKAGE_METADATA_MESSAGE_PHRASES = (
@@ -231,7 +246,13 @@ PACKAGE_METADATA_MESSAGE_PHRASES = (
     'release version',
     'prepare release',
     'version update',
-    'update version'
+    'update version',
+    'readme',
+    'typo',
+    'docs',
+    'history',
+    'manifest',
+    'metadata'
 )
 
 PACKAGE_METADATA_DIFF_KEYWORDS = (
@@ -246,10 +267,34 @@ PACKAGE_METADATA_DIFF_KEYWORDS = (
     'license'
 )
 
-PACKAGE_METADATA_MAX_CHANGED_LINES = 20
-PACKAGE_METADATA_MAX_LOC_CHANGE = 20
-PACKAGE_METADATA_MAX_DIFF_CHARS = 3000
-PACKAGE_METADATA_MAX_FILES = 2
+PACKAGE_METADATA_MAX_CHANGED_LINES = 80
+PACKAGE_METADATA_MAX_LOC_CHANGE = 80
+PACKAGE_METADATA_MAX_DIFF_CHARS = 6000
+PACKAGE_METADATA_MAX_FILES = 6
+
+# 테스트 코드만 변경된 커밋을 구분하기 위한 보수적 기준
+TEST_ONLY_MAX_CHANGED_LINES = 120
+TEST_ONLY_MAX_LOC_CHANGE = 120
+TEST_ONLY_MAX_DIFF_CHARS = 8000
+TEST_ONLY_MAX_FILES = 8
+
+# 주석/문서화 라인만 변경된 코드 파일 커밋을 구분하기 위한 보수적 기준
+COMMENT_OR_DOCSTRING_ONLY_MESSAGE_PHRASES = (
+    'comment',
+    'comments',
+    'docstring',
+    'docstrings',
+    'documentation',
+    'add docs',
+    'update docs',
+    '주석',
+    '설명 주석'
+)
+
+COMMENT_OR_DOCSTRING_ONLY_MAX_CHANGED_LINES = 80
+COMMENT_OR_DOCSTRING_ONLY_MAX_LOC_CHANGE = 80
+COMMENT_OR_DOCSTRING_ONLY_MAX_DIFF_CHARS = 5000
+COMMENT_OR_DOCSTRING_ONLY_MAX_FILES = 5
 
 # ==========================================
 # LLM 분석 공통 Helper 함수
@@ -309,10 +354,51 @@ def get_diff_changed_lines(diff_text):
 
     return changed_lines
 
+def get_diff_changed_lines_by_file(diff_text):
+    """Diff에서 파일별 실제 추가/삭제 라인을 추출"""
+    changed_lines_by_file = {}
+    current_filename = None
+
+    for line in (diff_text or "").splitlines():
+        if line.startswith("--- ") and line.endswith(" ---"):
+            current_filename = line[4:-4].strip()
+            if current_filename:
+                changed_lines_by_file.setdefault(current_filename, [])
+            continue
+
+        if not current_filename:
+            continue
+
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+
+        if line.startswith("+") or line.startswith("-"):
+            changed_lines_by_file[current_filename].append(line[1:].strip())
+
+    return changed_lines_by_file
+
 def has_structural_code_change(changed_lines):
     """변경 라인에 함수/클래스/API/DB 등 구조적 코드 변경이 포함됐는지 확인"""
     changed_text = "\n".join(changed_lines).lower()
     return any(pattern in changed_text for pattern in STRUCTURAL_CODE_PATTERNS)
+
+def is_comment_or_docstring_like_line(line):
+    """추가/삭제 라인이 주석 또는 docstring 라인처럼 보이는지 판별"""
+    stripped = (line or "").strip()
+
+    if not stripped:
+        return True
+
+    if stripped.startswith("#"):
+        return True
+
+    if stripped.startswith('"""') or stripped.startswith("'''"):
+        return True
+
+    if stripped.endswith('"""') or stripped.endswith("'''"):
+        return True
+
+    return False
 
 def is_env_or_url_only_commit(commit, changed_files, diff_chars):
     """단순 URL/환경값 변경 중심 커밋인지 보수적으로 판별"""
@@ -359,6 +445,24 @@ def is_env_or_url_only_commit(commit, changed_files, diff_chars):
 
     return True
 
+def is_test_file(filename):
+    """테스트 파일인지 보수적으로 판별"""
+    normalized = (filename or "").replace("\\", "/").lower()
+    basename = os.path.basename(normalized)
+
+    return (
+        normalized.startswith("tests/")
+        or "/tests/" in normalized
+        or basename.startswith("test_")
+        or basename.endswith("_test.py")
+        or basename.endswith("test.py")
+    )
+
+def is_package_metadata_file(filename):
+    """패키지 배포 메타데이터 파일인지 판별"""
+    lower_basename = os.path.basename(filename or "").lower()
+    return lower_basename in tuple(name.lower() for name in PACKAGE_METADATA_FILES)
+
 def is_package_metadata_only_commit(commit, changed_files, diff_chars):
     """패키지 버전/배포 메타데이터만 바뀐 커밋인지 보수적으로 판별"""
     message = (commit.message or "").lower()
@@ -373,12 +477,10 @@ def is_package_metadata_only_commit(commit, changed_files, diff_chars):
     if len(changed_files) > PACKAGE_METADATA_MAX_FILES:
         return False
 
-    changed_basenames = [
-        os.path.basename(filename or "").lower()
+    if not all(
+        is_package_metadata_file(filename) or is_doc_or_config_file(filename)
         for filename in changed_files
-    ]
-
-    if not all(filename in PACKAGE_METADATA_FILES for filename in changed_basenames):
+    ):
         return False
 
     loc_changed = (commit.loc_added or 0) + (commit.loc_deleted or 0)
@@ -407,11 +509,107 @@ def is_package_metadata_only_commit(commit, changed_files, diff_chars):
     if not message_has_package_phrase and not diff_has_metadata_keyword:
         return False
 
-    # setup.py라도 함수/클래스/실행 로직이 바뀌면 코드 변경으로 본다
-    if has_structural_code_change(changed_lines):
+    # README/HISTORY 문서 예제 코드의 import/from/def를 실제 코드 변경으로 오판하지 않도록,
+    # 구조적 코드 변경 검사는 setup.py/setup.cfg/pyproject.toml/MANIFEST.in 등 패키지 메타데이터 파일 변경 라인에만 적용
+    changed_lines_by_file = get_diff_changed_lines_by_file(diff_text)
+    package_metadata_changed_lines = []
+
+    for filename, lines in changed_lines_by_file.items():
+        if is_package_metadata_file(filename):
+            package_metadata_changed_lines.extend(lines)
+
+    if has_structural_code_change(package_metadata_changed_lines):
         return False
 
     return True
+
+def is_test_only_commit(commit, changed_files, diff_chars):
+    """테스트 코드만 변경된 커밋인지 보수적으로 판별"""
+    diff_text = commit.diff_text or ""
+
+    if not diff_text.strip():
+        return False
+
+    if not changed_files:
+        return False
+
+    if len(changed_files) > TEST_ONLY_MAX_FILES:
+        return False
+
+    has_test_file = any(
+        is_test_file(filename)
+        for filename in changed_files
+    )
+
+    if not has_test_file:
+        return False
+
+    if not all(
+        is_test_file(filename) or is_doc_or_config_file(filename)
+        for filename in changed_files
+    ):
+        return False
+
+    loc_changed = (commit.loc_added or 0) + (commit.loc_deleted or 0)
+    if loc_changed > TEST_ONLY_MAX_LOC_CHANGE:
+        return False
+
+    if diff_chars > TEST_ONLY_MAX_DIFF_CHARS:
+        return False
+
+    changed_lines = get_diff_changed_lines(diff_text)
+    if len(changed_lines) > TEST_ONLY_MAX_CHANGED_LINES:
+        return False
+
+    return True
+
+def is_comment_or_docstring_only_commit(commit, changed_files, diff_chars):
+    """코드 파일에서 주석/docstring만 변경된 커밋인지 보수적으로 판별"""
+    message = (commit.message or "").lower()
+    diff_text = commit.diff_text or ""
+
+    if not diff_text.strip():
+        return False
+
+    if not changed_files:
+        return False
+
+    if len(changed_files) > COMMENT_OR_DOCSTRING_ONLY_MAX_FILES:
+        return False
+
+    # 문서/설정 파일만 바뀐 경우는 기존 doc_or_config_only가 처리하게 둔다.
+    # 여기서는 .py 같은 코드 파일의 주석/docstring 변경을 잡는다.
+    if all(is_doc_or_config_file(filename) for filename in changed_files):
+        return False
+
+    loc_changed = (commit.loc_added or 0) + (commit.loc_deleted or 0)
+    if loc_changed > COMMENT_OR_DOCSTRING_ONLY_MAX_LOC_CHANGE:
+        return False
+
+    if diff_chars > COMMENT_OR_DOCSTRING_ONLY_MAX_DIFF_CHARS:
+        return False
+
+    changed_lines = get_diff_changed_lines(diff_text)
+    if not changed_lines:
+        return False
+
+    if len(changed_lines) > COMMENT_OR_DOCSTRING_ONLY_MAX_CHANGED_LINES:
+        return False
+
+    message_has_comment_phrase = any(
+        phrase in message
+        for phrase in COMMENT_OR_DOCSTRING_ONLY_MESSAGE_PHRASES
+    )
+
+    # 모든 변경 라인이 명확히 주석/docstring 형태면 메시지와 무관하게 인정
+    if all(is_comment_or_docstring_like_line(line) for line in changed_lines):
+        return True
+
+    # 메시지가 주석/문서화 중심이어도 실제 코드 구조 변경이 보이면 제외
+    if message_has_comment_phrase and not has_structural_code_change(changed_lines):
+        return True
+
+    return False
 
 def classify_commit_for_analysis(commit):
     """커밋 Diff와 메타데이터를 기준으로 LLM 분석용 커밋 유형을 분류"""
@@ -435,6 +633,10 @@ def classify_commit_for_analysis(commit):
         estimated_type = "env_or_url_only"
     elif is_package_metadata_only_commit(commit, changed_files, diff_chars):
         estimated_type = "package_metadata_only"
+    elif is_test_only_commit(commit, changed_files, diff_chars):
+        estimated_type = "test_only"
+    elif is_comment_or_docstring_only_commit(commit, changed_files, diff_chars):
+        estimated_type = "comment_or_docstring_only"    
     elif file_count > 0 and doc_or_config_file_count == file_count:
         estimated_type = "doc_or_config_only"
     elif file_count > 0 and (doc_or_config_file_count / file_count) >= 0.7:
@@ -554,6 +756,7 @@ Field rules:
 - Do not give a default score such as 70 when evidence is insufficient.
 - Do not score documentation-only, config-only, formatting-only, empty-diff, or large-code-diff-pending commits.
 - Do not assign a partial or approximate score based only on a visible or truncated part of a large diff.
+- Do not score test-only or comment/docstring-only commits in v1.
 
 3. analysis_status
 Use only one of these four values:
@@ -579,7 +782,8 @@ Do not use "truncated" as analysis_status.
 - English technical terms are allowed only when they are natural code/API terms such as except, null, API, DB, JSON, or diff.
 - Do not write generic praise such as "잘 구현되었습니다", "성공적으로 추가되었습니다", or "기능 구현이 잘 되었습니다".
 - Mention one concrete technical reason, limitation, or risk that explains the score or status.
-- For success results, mention one concrete strength and one limitation when possible.
+- Keep score_reason concise, preferably 40-90 Korean characters.
+- For success results, mention the strongest reason for the score; mention a limitation only if it fits concisely.
 
 Commit type policy:
 
@@ -629,6 +833,21 @@ Do not invent missing information.
 - analysis_status: "skipped".
 - score_reason: explain that package metadata changes are excluded from backend code-quality scoring.
 - Do not assign a numeric score only because the change appears in a Python file such as setup.py.
+
+4-3. test_only
+- Treat commits that only change test files as outside runtime backend code-quality scoring in v1.
+- commit_summary: summarize the test addition or update.
+- commit_backend_score: null.
+- analysis_status: "skipped".
+- score_reason: explain that test-only changes are excluded from runtime backend code-quality scoring.
+- Do not treat test-only work as low-quality code; it is valid contribution but outside this score.
+
+4-4. comment_or_docstring_only
+- Treat commits that only add or update comments/docstrings as outside backend code-quality scoring.
+- commit_summary: summarize the documentation/comment improvement.
+- commit_backend_score: null.
+- analysis_status: "skipped".
+- score_reason: explain that comment/docstring-only changes are excluded from backend code-quality scoring.
 
 5. code_like
 - Analyze the provided diff.
@@ -719,6 +938,8 @@ Scoring guidance:
 - Do not assign 80+ merely because an API endpoint or feature was added; scores above 80 require visible evidence of coherent structure, basic edge-case handling, and maintainability.
 - Do not default to 85 for generally good-looking commits.
 - If timeout handling, pagination, JSON parsing safety, null handling, or error observability is not visible, prefer a score below 85 even when the feature works.
+- Pure rename, API naming cleanup, compatibility wrapper, or small refactor-only commits should not receive 90+ unless they clearly improve behavior, reliability, architecture, or maintainability beyond naming consistency.
+- For small rename/refactor-only commits with tests, prefer 75-84.
 
 Important:
 - Do not reward large LOC by itself.
@@ -794,6 +1015,12 @@ def build_policy_based_summary(commit, classification):
     
     if estimated_type == "package_metadata_only":
         return "패키지 버전 또는 배포 메타데이터를 갱신함."
+    
+    if estimated_type == "test_only":
+        return "테스트 코드만 변경되어 백엔드 코드 품질 점수 산정에서 제외함."
+
+    if estimated_type == "comment_or_docstring_only":
+        return "주석 또는 docstring 중심 변경으로 코드 문서화를 보강함."
 
     if estimated_type == "doc_or_config_only":
         return "문서 또는 설정 파일 중심으로 프로젝트 설명과 환경 구성을 정리함."
@@ -846,6 +1073,12 @@ def build_policy_based_analysis_result(commit, classification=None):
     elif estimated_type == "package_metadata_only":
         analysis_status = "skipped"
         score_reason = "패키지 메타데이터 변경으로 코드 품질 점수 산정에서 제외함."
+    elif estimated_type == "test_only":
+        analysis_status = "skipped"
+        score_reason = "테스트 코드 전용 변경으로 런타임 코드 품질 점수 산정에서 제외함."
+    elif estimated_type == "comment_or_docstring_only":
+        analysis_status = "skipped"
+        score_reason = "주석/docstring 중심 변경으로 코드 품질 점수 산정에서 제외함."    
     elif estimated_type in ("doc_or_config_only", "doc_or_config_heavy"):
         analysis_status = "skipped"
         score_reason = "문서/설정 중심 변경으로 코드 품질 점수 산정에서 제외함."
@@ -896,6 +1129,19 @@ def normalize_commit_summary_style(commit_summary):
 
     return summary
 
+def normalize_score_reason_style(score_reason):
+    """score_reason을 내부 검증용으로 짧고 일관되게 정리"""
+    if score_reason is None:
+        return None
+
+    reason = score_reason.strip()
+
+    # 너무 긴 근거는 내부 검증에 필요한 범위까지만 유지
+    if len(reason) > SCORE_REASON_MAX_CHARS:
+        reason = reason[:SCORE_REASON_MAX_CHARS - 1].rstrip() + "…"
+
+    return reason
+
 def validate_commit_analysis_result(result, expected_type=None):
     """커밋 분석 결과 JSON이 저장 가능한 형태인지 검증하고 필요한 값만 정리"""
     if not isinstance(result, dict):
@@ -928,6 +1174,8 @@ def validate_commit_analysis_result(result, expected_type=None):
     if not isinstance(score_reason, str):
         raise ValueError("score_reason은 문자열이어야 합니다.")
 
+    score_reason = normalize_score_reason_style(score_reason)
+
     if commit_backend_score is not None:
         if not isinstance(commit_backend_score, (int, float)):
             raise ValueError("commit_backend_score는 숫자 또는 null이어야 합니다.")
@@ -950,6 +1198,8 @@ def validate_commit_analysis_result(result, expected_type=None):
         "format_only",
         "env_or_url_only",
         "package_metadata_only",
+        "test_only",
+        "comment_or_docstring_only",
         "doc_or_config_only",
         "doc_or_config_heavy"
     ) and analysis_status != "skipped":
@@ -989,6 +1239,35 @@ def build_safe_commit_input_for_llm(commit_input):
 
     return safe_commit_input
 
+OPENAI_COMMIT_ANALYSIS_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "commit_summary": {
+            "type": ["string", "null"],
+            "description": "Korean one-sentence summary of the commit change"
+        },
+        "commit_backend_score": {
+            "type": ["number", "null"],
+            "description": "Backend code quality score from 0 to 100, or null if not applicable"
+        },
+        "analysis_status": {
+            "type": "string",
+            "enum": ["success", "skipped", "large_diff_pending", "failed"],
+            "description": "Commit analysis status"
+        },
+        "score_reason": {
+            "type": "string",
+            "description": "Short Korean reason for the score or status"
+        }
+    },
+    "required": [
+        "commit_summary",
+        "commit_backend_score",
+        "analysis_status",
+        "score_reason"
+    ]
+}
 
 def extract_text_from_gemini_response(response_json):
     """Gemini 응답 JSON에서 모델이 생성한 텍스트 추출"""
@@ -997,6 +1276,49 @@ def extract_text_from_gemini_response(response_json):
     except (KeyError, IndexError, TypeError) as e:
         raise ValueError("Gemini 응답에서 텍스트를 추출할 수 없습니다.") from e
 
+def extract_text_from_openai_response(response_json):
+    """OpenAI Responses API 응답 JSON에서 모델이 생성한 텍스트 추출"""
+    if not isinstance(response_json, dict):
+        raise ValueError("OpenAI 응답이 dict 형식이 아닙니다.")
+
+    # SDK가 아닌 REST 응답에서도 output_text가 있을 수 있으므로 먼저 확인
+    output_text = response_json.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+
+    collected_texts = []
+
+    try:
+        for output_item in response_json.get("output", []):
+            # 일반 message output
+            for content_item in output_item.get("content", []):
+                if not isinstance(content_item, dict):
+                    continue
+
+                text = content_item.get("text")
+                if isinstance(text, str) and text.strip():
+                    collected_texts.append(text)
+
+                # 일부 응답은 refusal 형태일 수 있음
+                refusal = content_item.get("refusal")
+                if isinstance(refusal, str) and refusal.strip():
+                    raise ValueError(f"OpenAI 응답이 refusal을 반환했습니다: {refusal[:500]}")
+    except (AttributeError, TypeError) as e:
+        raise ValueError("OpenAI 응답 구조를 순회할 수 없습니다.") from e
+
+    if collected_texts:
+        return "\n".join(collected_texts)
+
+    status = response_json.get("status")
+    incomplete_details = response_json.get("incomplete_details")
+    error = response_json.get("error")
+    output_preview = json.dumps(response_json.get("output", []), ensure_ascii=False)[:1200]
+
+    raise ValueError(
+        "OpenAI 응답에서 텍스트를 추출할 수 없습니다. "
+        f"status={status}, incomplete_details={incomplete_details}, "
+        f"error={error}, output_preview={output_preview}"
+    )
 
 def parse_llm_json_response(response_text):
     """LLM 응답 텍스트를 JSON 객체로 파싱"""
@@ -1017,7 +1339,7 @@ def parse_llm_json_response(response_text):
         raise ValueError("LLM 응답을 JSON으로 파싱할 수 없습니다.") from e
 
 
-def call_llm_for_commit_analysis(commit_input):
+def call_gemini_for_commit_analysis(commit_input):
     """Gemini API를 호출하여 code_like 커밋의 분석 결과 JSON 생성"""
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.")
@@ -1081,6 +1403,75 @@ def call_llm_for_commit_analysis(commit_input):
     except ValueError as e:
         raw_result_preview = json.dumps(parsed_result, ensure_ascii=False)[:500]
         raise ValueError(f"{str(e)} / raw_result={raw_result_preview}") from e
+
+def call_openai_for_commit_analysis(commit_input):
+    """OpenAI API를 호출하여 code_like 커밋의 분석 결과 JSON 생성"""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY 환경변수가 설정되어 있지 않습니다.")
+
+    safe_commit_input = build_safe_commit_input_for_llm(commit_input)
+    user_prompt = build_commit_analysis_user_prompt(safe_commit_input)
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "instructions": COMMIT_ANALYSIS_SYSTEM_PROMPT,
+        "input": user_prompt,
+        "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+        "store": False,
+        "reasoning": {
+            "effort": "minimal"
+        },
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "commit_analysis_result",
+                "schema": OPENAI_COMMIT_ANALYSIS_RESPONSE_SCHEMA,
+                "strict": True
+            }
+        }
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.post(
+            OPENAI_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        error_message = ""
+        if "response" in locals() and response is not None:
+            error_message = response.text[:1200]
+        raise RuntimeError(f"OpenAI API 호출에 실패했습니다. {error_message}") from e
+
+    response_json = response.json()
+    response_text = extract_text_from_openai_response(response_json)
+    parsed_result = parse_llm_json_response(response_text)
+
+    try:
+        return validate_commit_analysis_result(
+            parsed_result,
+            expected_type=safe_commit_input.get("estimated_type")
+        )
+    except ValueError as e:
+        raw_result_preview = json.dumps(parsed_result, ensure_ascii=False)[:500]
+        raise ValueError(f"{str(e)} / raw_result={raw_result_preview}") from e
+
+def call_llm_for_commit_analysis(commit_input):
+    """설정된 LLM provider에 따라 커밋 분석 API 호출"""
+    if LLM_PROVIDER == "openai":
+        return call_openai_for_commit_analysis(commit_input)
+
+    if LLM_PROVIDER == "gemini":
+        return call_gemini_for_commit_analysis(commit_input)
+
+    raise RuntimeError(f"지원하지 않는 LLM_PROVIDER 값입니다: {LLM_PROVIDER}")
 
 # ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
@@ -1639,6 +2030,8 @@ def get_analysis_estimate(project_id):
     format_only_commits = 0
     env_or_url_only_commits = 0
     package_metadata_only_commits = 0
+    test_only_commits = 0
+    comment_or_docstring_only_commits = 0
     code_like_commits = 0
     large_code_diff_commits = 0
     largest_diff_chars = 0
@@ -1674,6 +2067,10 @@ def get_analysis_estimate(project_id):
                 env_or_url_only_commits += 1
             elif commit_type == "package_metadata_only":
                 package_metadata_only_commits += 1
+            elif commit_type == "test_only":
+                test_only_commits += 1
+            elif commit_type == "comment_or_docstring_only":
+                comment_or_docstring_only_commits += 1
             elif commit_type == "doc_or_config_only":
                 doc_or_config_only_commits += 1
             elif commit_type == "doc_or_config_heavy":
@@ -1690,7 +2087,15 @@ def get_analysis_estimate(project_id):
             total_output_tokens_all += output_tokens
 
             # 문서/설정 전용 및 포맷팅 전용 커밋은 코드 품질 점수 대상에서 제외될 가능성이 높다고 보고 별도 추정
-            if commit_type not in ("doc_or_config_only", "doc_or_config_heavy", "format_only", "env_or_url_only", "package_metadata_only"):
+            if commit_type not in (
+                "doc_or_config_only",
+                "doc_or_config_heavy",
+                "format_only",
+                "env_or_url_only",
+                "package_metadata_only",
+                "test_only",
+                "comment_or_docstring_only"
+            ):
                 total_input_tokens_code_like += input_tokens
                 total_output_tokens_code_like += output_tokens
 
@@ -1734,6 +2139,8 @@ def get_analysis_estimate(project_id):
             "format_only_commits": format_only_commits,
             "env_or_url_only_commits": env_or_url_only_commits,
             "package_metadata_only_commits": package_metadata_only_commits,
+            "test_only_commits": test_only_commits,
+            "comment_or_docstring_only_commits": comment_or_docstring_only_commits,
             "doc_or_config_only_commits": doc_or_config_only_commits,
             "doc_or_config_heavy_commits": doc_or_config_heavy_commits
         },
@@ -1764,7 +2171,7 @@ def get_analysis_estimate(project_id):
         "notes": [
             "이 API는 실제 LLM을 호출하지 않습니다.",
             "비용은 diff_text 길이와 고정 출력 토큰 수를 기반으로 한 보수적 추정치입니다.",
-            "문서/설정, 포맷팅, 환경값/URL, 패키지 메타데이터 중심 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
+            "문서/설정, 포맷팅, 환경값/URL, 패키지 메타데이터, 테스트 전용, 주석/docstring 중심 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
             "diff_truncated가 true인 커밋은 실제 분석 시 제공되지 않은 Diff 뒷부분을 추측하지 않도록 제한해야 합니다.",
             "large_code_diff 커밋은 앞부분만 보고 점수를 단정하지 않고, 추후 chunk 분석 또는 별도 분석 대상으로 분리하는 것이 안전합니다.",
             "실제 비용은 모델, 프롬프트 길이, 출력 길이, 캐시 여부에 따라 달라질 수 있습니다."
