@@ -8,6 +8,8 @@ const MainPage = () => {
   const [isLoggedIn, setIsLoggedIn] = useState(() => {
     const savedLoginState = localStorage.getItem('isLoggedIn');
     return savedLoginState === 'true'; // localStorage는 문자열로 저장하므로 'true' 문자열과 비교
+    // isLoggedIn 키 대신 실제 데이터인 user_id가 있는지로 판단하는 것이 더 정확합니다.
+    return !!localStorage.getItem('user_id');
   });
   const [userRepos, setUserRepos] = useState(() => {
     const savedUserRepos = localStorage.getItem('userRepos');
@@ -74,19 +76,31 @@ const MainPage = () => {
 
   const handleLogin = () => {
     // 백엔드 인증 페이지로 이동
-    window.location.href = 'http://3.39.190.222:5000/api/auth/github';
+    // 상대 경로를 사용하면 Vercel 프록시를 통해 전달될 수 있습니다.
+    window.location.href = '/api/auth/github';
   };
 
   const handleLogout = () => {
     setIsLoggedIn(false);
     setUserRepos([]);
-    setHistory([]); // 로그아웃 시 분석 기록도 초기화
-    localStorage.clear(); // 모든 인증 정보 제거
+    // 분석 기록(history)은 초기화하지 않고 유지합니다.
+    // 전체 삭제(clear) 대신 인증 및 유저 정보만 선택적으로 삭제합니다.
+    localStorage.removeItem('user_id');
+    localStorage.removeItem('github_id');
+    localStorage.removeItem('profile_image');
+    localStorage.removeItem('userRepos');
     alert('로그아웃 되었습니다.');
   };
 
   const goToAnalysis = (url) => {
     navigate('/loading', { state: { repoUrl: url } });
+  };
+
+  const handleDeleteHistory = (e, url) => {
+    e.stopPropagation(); // 부모 div의 클릭 이벤트(페이지 이동)가 발생하지 않도록 방지
+    if (window.confirm('이 분석 기록을 삭제하시겠습니까?')) {
+      setHistory(prevHistory => prevHistory.filter(item => item.url !== url));
+    }
   };
 
   const handleStartAnalysis = () => {
@@ -99,7 +113,14 @@ const MainPage = () => {
     const newHistoryItem = {
       name: repoUrl.split('/').pop(), // URL에서 리포지토리 이름 추출
       url: repoUrl,
-      date: new Date().toISOString().split('T')[0], // YYYY-MM-DD 형식의 현재 날짜
+      date: new Date().toLocaleString('ko-KR', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true // 오전/오후 표시로 가독성 향상
+      }), 
     };
 
     // 이미 기록에 있는 항목이라면 제거하고, 새로운 항목을 가장 최근으로 추가
@@ -189,8 +210,28 @@ const MainPage = () => {
                   onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f8fafc'}
                   onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ffffff'}
                 >
-                  <span style={{ color: '#4f46e5', fontWeight: '600' }}>{item.name}</span>
-                  <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>{item.date}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                    <span style={{ color: '#4f46e5', fontWeight: '600' }}>{item.name}</span>
+                    <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>{item.date}</span>
+                  </div>
+                  <button 
+                    onClick={(e) => handleDeleteHistory(e, item.url)}
+                    style={{ 
+                      padding: '6px 10px', 
+                      backgroundColor: 'transparent', 
+                      color: '#94a3b8', 
+                      border: 'none', 
+                      borderRadius: '4px', 
+                      fontSize: '0.8rem', 
+                      cursor: 'pointer',
+                      fontWeight: '500',
+                      transition: 'all 0.2s'
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#fee2e2'; e.currentTarget.style.color = '#b91c1c'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.color = '#94a3b8'; }}
+                  >
+                    삭제
+                  </button>
                 </div>
               ))}
             </div>

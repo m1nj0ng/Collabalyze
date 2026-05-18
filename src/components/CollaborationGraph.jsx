@@ -1,37 +1,194 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
-const CollaborationGraph = () => {
-  // 시뮬레이션을 위한 데이터 (누가 누구의 코드를 리뷰했는지 등)
-  const relations = [
-    { from: 'Alice', to: 'Bob', label: 'Review' },
-    { from: 'Bob', to: 'Charlie', label: 'Review' },
-    { from: 'Charlie', to: 'Alice', label: 'PR Approved' },
+const CollaborationGraph = ({ data }) => {
+  const svgRef = useRef(null);
+  const [nodes, setNodes] = useState([
+    { id: 'Alice', x: 200, y: 100, color: '#4f46e5', score: 95 },
+    { id: 'Bob', x: 300, y: 200, color: '#10b981', score: 88 },
+    { id: 'Charlie', x: 200, y: 300, color: '#f59e0b', score: 72 },
+    { id: 'Dave', x: 100, y: 200, color: '#ef4444', score: 92 },
+    { id: 'Eve', x: 100, y: 320, color: '#8b5cf6', score: 89 },
+  ]);
+
+  const links = [
+    { source: 'Alice', target: 'Bob', value: 4 },
+    { source: 'Bob', target: 'Charlie', value: 2 },
+    { source: 'Charlie', target: 'Alice', value: 2 },
+    { source: 'Dave', target: 'Alice', value: 5, bidirectional: true }, // 양방향 관계 추가
+    { source: 'Eve', target: 'Bob', value: 3 },
+    { source: 'Alice', target: 'Eve', value: 2 },
   ];
+  
+  const [viewBox, setViewBox] = useState({ x: 0, y: 0, w: 400, h: 400 });
+  const [draggingNode, setDraggingNode] = useState(null);
+
+  const findNode = (id) => nodes.find(n => n.id === id);
+  // 점수에 따른 노드 반경 계산 (최소 18, 최대 35 내외)
+  const getRadius = (score) => (score - 70) * 0.8 + 18;
+
+  // 드래그 핸들러
+  const onMouseDown = (id) => (e) => {
+    setDraggingNode(id);
+    e.stopPropagation();
+  };
+
+  const onMouseMove = (e) => {
+    if (!draggingNode || !svgRef.current) return;
+
+    e.preventDefault(); // 드래그 중 브라우저 기본 스크롤 및 텍스트 선택 방지
+
+    const svg = svgRef.current;
+    const CTM = svg.getScreenCTM();
+    const x = (e.clientX - CTM.e) / CTM.a;
+    const y = (e.clientY - CTM.f) / CTM.d;
+
+    setNodes(prev => prev.map(n => n.id === draggingNode ? { ...n, x, y } : n));
+  };
+
+  const onMouseUp = () => setDraggingNode(null);
+
+  // 휠 줌 핸들러
+  const onWheel = (e) => {
+    e.preventDefault();
+    const scale = e.deltaY > 0 ? 1.1 : 0.9;
+    setViewBox(prev => ({
+      ...prev,
+      x: prev.x + (prev.w - prev.w * scale) / 2,
+      y: prev.y + (prev.h - prev.h * scale) / 2,
+      w: prev.w * scale,
+      h: prev.h * scale
+    }));
+  };
+  useEffect(() => {
+    const svgElement = svgRef.current;
+    if (!svgElement) return;
+
+    const handleWheel = (e) => {
+      e.preventDefault(); // 페이지 스크롤 방지
+      const scale = e.deltaY > 0 ? 1.1 : 0.9;
+      
+      setViewBox(prev => ({
+        ...prev,
+        x: prev.x + (prev.w - prev.w * scale) / 2,
+        y: prev.y + (prev.h - prev.h * scale) / 2,
+        w: prev.w * scale,
+        h: prev.h * scale
+      }));
+    };
+
+    svgElement.addEventListener('wheel', handleWheel, { passive: false });
+    return () => svgElement.removeEventListener('wheel', handleWheel);
+  }, []);
 
   return (
-    <div style={{ width: '100%', height: '250px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#f9f9f9', borderRadius: '8px', border: '1px dashed #ccc' }}>
-      <div style={{ display: 'flex', gap: '40px', marginBottom: '20px' }}>
-        {['Alice', 'Bob', 'Charlie'].map(name => (
-          <div key={name} style={{ textAlign: 'center' }}>
-            <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: '#0969da', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 5px', fontSize: '0.8rem' }}>
-              {name[0]}
-            </div>
-            <span style={{ fontSize: '0.8rem', color: '#555' }}>{name}</span>
-          </div>
+    <div 
+      style={{ 
+        width: '100%', 
+        height: '100%', 
+        position: 'relative', 
+        cursor: draggingNode ? 'grabbing' : 'default',
+        touchAction: 'none' // 터치 환경에서 드래그 시 화면 스크롤 방지
+      }}
+      onMouseMove={onMouseMove}
+      onMouseUp={onMouseUp}
+      onMouseLeave={onMouseUp}
+    >
+      <svg 
+        ref={svgRef}
+        width="100%" 
+        height="400" 
+        viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`} 
+        preserveAspectRatio="xMidYMid meet"
+        onWheel={onWheel}
+      >
+        {/* 연결 선 (Links) */}
+        <defs>
+          <marker 
+            id="arrowhead" 
+            markerWidth="12" 
+            markerHeight="12" 
+            refX="10" 
+            refY="5" 
+            orient="auto-start-reverse"
+            markerUnits="userSpaceOnUse" // 선 두께에 상관없이 화살표 크기 고정
+          >
+            <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8" />
+          </marker>
+        </defs>
+        
+        {links.map((link, i) => {
+          const s = findNode(link.source);
+          const t = findNode(link.target);
+          if (!s || !t) return null;
+
+          // 선의 양 끝점이 노드 테두리에 닿도록 계산
+          const dx = t.x - s.x;
+          const dy = t.y - s.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          
+          const sourceR = getRadius(s.score) + 3;
+          const targetR = getRadius(t.score) + 3;
+          
+          const x1 = s.x + (dx * sourceR) / dist;
+          const y1 = s.y + (dy * sourceR) / dist;
+          const x2 = t.x - (dx * targetR) / dist;
+          const y2 = t.y - (dy * targetR) / dist;
+
+          return (
+            <line
+              key={`link-${i}`}
+              x1={x1} 
+              y1={y1}
+              x2={x2} 
+              y2={y2}
+              stroke="#e2e8f0"
+              strokeWidth={link.value * 4} // 두께 차이를 더 극명하게 조정 (2.5 -> 4)
+              markerStart={link.bidirectional ? "url(#arrowhead)" : undefined}
+              markerEnd="url(#arrowhead)"
+            >
+              <title>{link.source} ↔ {link.target}: {link.value} Reviews</title>
+            </line>
+          );
+        })}
+
+        {/* 노드 (Nodes) */}
+        {nodes.map((node) => (
+          <g 
+            key={node.id} 
+            onMouseDown={onMouseDown(node.id)}
+            style={{ cursor: draggingNode === node.id ? 'grabbing' : 'grab' }}
+          >
+            <circle
+              cx={node.x}
+              cy={node.y}
+              r={getRadius(node.score)} 
+              fill="white"
+              stroke={node.color}
+              strokeWidth="3"
+              style={{ filter: 'drop-shadow(0px 2px 3px rgba(0,0,0,0.1))' }}
+            />
+            <text
+              x={node.x}
+              y={node.y}
+              textAnchor="middle"
+              dy=".3em"
+              fill={node.color}
+              style={{ fontSize: '10px', fontWeight: 'bold' }}
+            >
+              {node.id[0]}
+            </text>
+            <text
+              x={node.x}
+              y={node.y + getRadius(node.score) + 15}
+              textAnchor="middle"
+              fill="#475569"
+              style={{ fontSize: '11px', fontWeight: '600' }}
+            >
+              {node.id}
+            </text>
+          </g>
         ))}
-      </div>
-      <div style={{ fontSize: '0.85rem', color: '#666', textAlign: 'left', width: '80%' }}>
-        <ul style={{ paddingLeft: '20px', margin: 0 }}>
-          {relations.map((rel, i) => (
-            <li key={i}>
-              <strong>{rel.from}</strong> &rarr; <strong>{rel.to}</strong> ({rel.label})
-            </li>
-          ))}
-        </ul>
-      </div>
-      <p style={{ fontSize: '0.75rem', color: '#999', marginTop: '15px' }}>
-        * 실제 Git PR/Review 데이터를 기반으로 연결망이 구성됩니다.
-      </p>
+      </svg>
     </div>
   );
 };
