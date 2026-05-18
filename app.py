@@ -1037,18 +1037,47 @@ def extract_text_from_gemini_response(response_json):
 
 def extract_text_from_openai_response(response_json):
     """OpenAI Responses API 응답 JSON에서 모델이 생성한 텍스트 추출"""
-    if response_json.get("output_text"):
-        return response_json["output_text"]
+    if not isinstance(response_json, dict):
+        raise ValueError("OpenAI 응답이 dict 형식이 아닙니다.")
+
+    # SDK가 아닌 REST 응답에서도 output_text가 있을 수 있으므로 먼저 확인
+    output_text = response_json.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+
+    collected_texts = []
 
     try:
         for output_item in response_json.get("output", []):
+            # 일반 message output
             for content_item in output_item.get("content", []):
-                if "text" in content_item:
-                    return content_item["text"]
-    except (AttributeError, TypeError) as e:
-        raise ValueError("OpenAI 응답에서 텍스트를 추출할 수 없습니다.") from e
+                if not isinstance(content_item, dict):
+                    continue
 
-    raise ValueError("OpenAI 응답에서 텍스트를 추출할 수 없습니다.")
+                text = content_item.get("text")
+                if isinstance(text, str) and text.strip():
+                    collected_texts.append(text)
+
+                # 일부 응답은 refusal 형태일 수 있음
+                refusal = content_item.get("refusal")
+                if isinstance(refusal, str) and refusal.strip():
+                    raise ValueError(f"OpenAI 응답이 refusal을 반환했습니다: {refusal[:500]}")
+    except (AttributeError, TypeError) as e:
+        raise ValueError("OpenAI 응답 구조를 순회할 수 없습니다.") from e
+
+    if collected_texts:
+        return "\n".join(collected_texts)
+
+    status = response_json.get("status")
+    incomplete_details = response_json.get("incomplete_details")
+    error = response_json.get("error")
+    output_preview = json.dumps(response_json.get("output", []), ensure_ascii=False)[:1200]
+
+    raise ValueError(
+        "OpenAI 응답에서 텍스트를 추출할 수 없습니다. "
+        f"status={status}, incomplete_details={incomplete_details}, "
+        f"error={error}, output_preview={output_preview}"
+    )
 
 def parse_llm_json_response(response_text):
     """LLM 응답 텍스트를 JSON 객체로 파싱"""
@@ -1146,8 +1175,11 @@ def call_openai_for_commit_analysis(commit_input):
         "model": OPENAI_MODEL,
         "instructions": COMMIT_ANALYSIS_SYSTEM_PROMPT,
         "input": user_prompt,
-        "max_output_tokens": 512,
+        "max_output_tokens": 1500,
         "store": False,
+        "reasoning": {
+            "effort": "minimal"
+        },
         "text": {
             "format": {
                 "type": "json_schema",
