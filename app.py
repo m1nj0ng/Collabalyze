@@ -72,10 +72,19 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
 
+# LLM API 호출용 설정
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+
 # Gemini API 호출용 설정
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+# OpenAI API 호출용 설정
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+OPENAI_API_URL = "https://api.openai.com/v1/responses"
+
 MAX_LLM_ANALYSIS_LIMIT = 20
 
 # ==========================================
@@ -989,6 +998,35 @@ def build_safe_commit_input_for_llm(commit_input):
 
     return safe_commit_input
 
+OPENAI_COMMIT_ANALYSIS_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "commit_summary": {
+            "type": ["string", "null"],
+            "description": "Korean one-sentence summary of the commit change"
+        },
+        "commit_backend_score": {
+            "type": ["number", "null"],
+            "description": "Backend code quality score from 0 to 100, or null if not applicable"
+        },
+        "analysis_status": {
+            "type": "string",
+            "enum": ["success", "skipped", "large_diff_pending", "failed"],
+            "description": "Commit analysis status"
+        },
+        "score_reason": {
+            "type": "string",
+            "description": "Short Korean reason for the score or status"
+        }
+    },
+    "required": [
+        "commit_summary",
+        "commit_backend_score",
+        "analysis_status",
+        "score_reason"
+    ]
+}
 
 def extract_text_from_gemini_response(response_json):
     """Gemini 응답 JSON에서 모델이 생성한 텍스트 추출"""
@@ -997,6 +1035,20 @@ def extract_text_from_gemini_response(response_json):
     except (KeyError, IndexError, TypeError) as e:
         raise ValueError("Gemini 응답에서 텍스트를 추출할 수 없습니다.") from e
 
+def extract_text_from_openai_response(response_json):
+    """OpenAI Responses API 응답 JSON에서 모델이 생성한 텍스트 추출"""
+    if response_json.get("output_text"):
+        return response_json["output_text"]
+
+    try:
+        for output_item in response_json.get("output", []):
+            for content_item in output_item.get("content", []):
+                if "text" in content_item:
+                    return content_item["text"]
+    except (AttributeError, TypeError) as e:
+        raise ValueError("OpenAI 응답에서 텍스트를 추출할 수 없습니다.") from e
+
+    raise ValueError("OpenAI 응답에서 텍스트를 추출할 수 없습니다.")
 
 def parse_llm_json_response(response_text):
     """LLM 응답 텍스트를 JSON 객체로 파싱"""
@@ -1017,7 +1069,7 @@ def parse_llm_json_response(response_text):
         raise ValueError("LLM 응답을 JSON으로 파싱할 수 없습니다.") from e
 
 
-def call_llm_for_commit_analysis(commit_input):
+def call_gemini_for_commit_analysis(commit_input):
     """Gemini API를 호출하여 code_like 커밋의 분석 결과 JSON 생성"""
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.")
@@ -1081,6 +1133,72 @@ def call_llm_for_commit_analysis(commit_input):
     except ValueError as e:
         raw_result_preview = json.dumps(parsed_result, ensure_ascii=False)[:500]
         raise ValueError(f"{str(e)} / raw_result={raw_result_preview}") from e
+
+def call_openai_for_commit_analysis(commit_input):
+    """OpenAI API를 호출하여 code_like 커밋의 분석 결과 JSON 생성"""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY 환경변수가 설정되어 있지 않습니다.")
+
+    safe_commit_input = build_safe_commit_input_for_llm(commit_input)
+    user_prompt = build_commit_analysis_user_prompt(safe_commit_input)
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "instructions": COMMIT_ANALYSIS_SYSTEM_PROMPT,
+        "input": user_prompt,
+        "max_output_tokens": 512,
+        "store": False,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "commit_analysis_result",
+                "schema": OPENAI_COMMIT_ANALYSIS_RESPONSE_SCHEMA,
+                "strict": True
+            }
+        }
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        response = requests.post(
+            OPENAI_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        error_message = ""
+        if "response" in locals() and response is not None:
+            error_message = response.text[:1200]
+        raise RuntimeError(f"OpenAI API 호출에 실패했습니다. {error_message}") from e
+
+    response_json = response.json()
+    response_text = extract_text_from_openai_response(response_json)
+    parsed_result = parse_llm_json_response(response_text)
+
+    try:
+        return validate_commit_analysis_result(
+            parsed_result,
+            expected_type=safe_commit_input.get("estimated_type")
+        )
+    except ValueError as e:
+        raw_result_preview = json.dumps(parsed_result, ensure_ascii=False)[:500]
+        raise ValueError(f"{str(e)} / raw_result={raw_result_preview}") from e
+
+def call_llm_for_commit_analysis(commit_input):
+    """설정된 LLM provider에 따라 커밋 분석 API 호출"""
+    if LLM_PROVIDER == "openai":
+        return call_openai_for_commit_analysis(commit_input)
+
+    if LLM_PROVIDER == "gemini":
+        return call_gemini_for_commit_analysis(commit_input)
+
+    raise RuntimeError(f"지원하지 않는 LLM_PROVIDER 값입니다: {LLM_PROVIDER}")
 
 # ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
