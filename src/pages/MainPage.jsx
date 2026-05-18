@@ -6,8 +6,6 @@ const MainPage = () => {
   const [repoUrl, setRepoUrl] = useState('');
   // 상태를 localStorage에서 초기화하거나 기본값으로 설정
   const [isLoggedIn, setIsLoggedIn] = useState(() => {
-    const savedLoginState = localStorage.getItem('isLoggedIn');
-    return savedLoginState === 'true'; // localStorage는 문자열로 저장하므로 'true' 문자열과 비교
     // isLoggedIn 키 대신 실제 데이터인 user_id가 있는지로 판단하는 것이 더 정확합니다.
     return !!localStorage.getItem('user_id');
   });
