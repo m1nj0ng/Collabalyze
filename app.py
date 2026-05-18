@@ -135,6 +135,7 @@ DOC_OR_CONFIG_FILENAMES = (
     'Dockerfile',
     'README',
     'LICENSE',
+    'HISTORY',
     'CHANGELOG',
     'CONTRIBUTING',
     'CODE_OF_CONDUCT',
@@ -147,6 +148,7 @@ DOC_OR_CONFIG_FILENAMES = (
 DOC_OR_CONFIG_BASENAME_PREFIXES = (
     'readme',
     'license',
+    'history',
     'changelog',
     'contributing',
     'code_of_conduct',
@@ -264,10 +266,10 @@ PACKAGE_METADATA_DIFF_KEYWORDS = (
     'license'
 )
 
-PACKAGE_METADATA_MAX_CHANGED_LINES = 20
-PACKAGE_METADATA_MAX_LOC_CHANGE = 20
-PACKAGE_METADATA_MAX_DIFF_CHARS = 3000
-PACKAGE_METADATA_MAX_FILES = 2
+PACKAGE_METADATA_MAX_CHANGED_LINES = 80
+PACKAGE_METADATA_MAX_LOC_CHANGE = 80
+PACKAGE_METADATA_MAX_DIFF_CHARS = 6000
+PACKAGE_METADATA_MAX_FILES = 6
 
 # ==========================================
 # LLM 분석 공통 Helper 함수
@@ -326,6 +328,29 @@ def get_diff_changed_lines(diff_text):
             changed_lines.append(line[1:].strip())
 
     return changed_lines
+
+def get_diff_changed_lines_by_file(diff_text):
+    """Diff에서 파일별 실제 추가/삭제 라인을 추출"""
+    changed_lines_by_file = {}
+    current_filename = None
+
+    for line in (diff_text or "").splitlines():
+        if line.startswith("--- ") and line.endswith(" ---"):
+            current_filename = line[4:-4].strip()
+            if current_filename:
+                changed_lines_by_file.setdefault(current_filename, [])
+            continue
+
+        if not current_filename:
+            continue
+
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+
+        if line.startswith("+") or line.startswith("-"):
+            changed_lines_by_file[current_filename].append(line[1:].strip())
+
+    return changed_lines_by_file
 
 def has_structural_code_change(changed_lines):
     """변경 라인에 함수/클래스/API/DB 등 구조적 코드 변경이 포함됐는지 확인"""
@@ -396,11 +421,6 @@ def is_package_metadata_only_commit(commit, changed_files, diff_chars):
     if len(changed_files) > PACKAGE_METADATA_MAX_FILES:
         return False
 
-    changed_basenames = [
-        os.path.basename(filename or "").lower()
-        for filename in changed_files
-    ]
-
     if not all(
         is_package_metadata_file(filename) or is_doc_or_config_file(filename)
         for filename in changed_files
@@ -433,8 +453,16 @@ def is_package_metadata_only_commit(commit, changed_files, diff_chars):
     if not message_has_package_phrase and not diff_has_metadata_keyword:
         return False
 
-    # setup.py라도 함수/클래스/실행 로직이 바뀌면 코드 변경으로 본다
-    if has_structural_code_change(changed_lines):
+    # README/HISTORY 문서 예제 코드의 import/from/def를 실제 코드 변경으로 오판하지 않도록,
+    # 구조적 코드 변경 검사는 setup.py/setup.cfg/pyproject.toml/MANIFEST.in 등 패키지 메타데이터 파일 변경 라인에만 적용
+    changed_lines_by_file = get_diff_changed_lines_by_file(diff_text)
+    package_metadata_changed_lines = []
+
+    for filename, lines in changed_lines_by_file.items():
+        if is_package_metadata_file(filename):
+            package_metadata_changed_lines.extend(lines)
+
+    if has_structural_code_change(package_metadata_changed_lines):
         return False
 
     return True
@@ -605,7 +633,6 @@ Do not use "truncated" as analysis_status.
 - English technical terms are allowed only when they are natural code/API terms such as except, null, API, DB, JSON, or diff.
 - Do not write generic praise such as "잘 구현되었습니다", "성공적으로 추가되었습니다", or "기능 구현이 잘 되었습니다".
 - Mention one concrete technical reason, limitation, or risk that explains the score or status.
-- For success results, mention the strongest reason for the score; mention a limitation only if it fits concisely.
 - Keep score_reason concise, preferably 40-90 Korean characters.
 - For success results, mention the strongest reason for the score; mention a limitation only if it fits concisely.
 
