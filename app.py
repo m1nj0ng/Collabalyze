@@ -86,6 +86,8 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 OPENAI_API_URL = "https://api.openai.com/v1/responses"
 
 MAX_LLM_ANALYSIS_LIMIT = 20
+SCORE_REASON_MAX_CHARS = 90
+OPENAI_MAX_OUTPUT_TOKENS = 900
 
 # ==========================================
 # LLM 분석 비용/토큰 추정용 설정값
@@ -230,7 +232,8 @@ STRUCTURAL_CODE_PATTERNS = (
 PACKAGE_METADATA_FILES = (
     'setup.py',
     'setup.cfg',
-    'pyproject.toml'
+    'pyproject.toml',
+    'manifest.in'
 )
 
 PACKAGE_METADATA_MESSAGE_PHRASES = (
@@ -240,7 +243,13 @@ PACKAGE_METADATA_MESSAGE_PHRASES = (
     'release version',
     'prepare release',
     'version update',
-    'update version'
+    'update version',
+    'readme',
+    'typo',
+    'docs',
+    'history',
+    'manifest',
+    'metadata'
 )
 
 PACKAGE_METADATA_DIFF_KEYWORDS = (
@@ -368,6 +377,11 @@ def is_env_or_url_only_commit(commit, changed_files, diff_chars):
 
     return True
 
+def is_package_metadata_file(filename):
+    """패키지 배포 메타데이터 파일인지 판별"""
+    lower_basename = os.path.basename(filename or "").lower()
+    return lower_basename in tuple(name.lower() for name in PACKAGE_METADATA_FILES)
+
 def is_package_metadata_only_commit(commit, changed_files, diff_chars):
     """패키지 버전/배포 메타데이터만 바뀐 커밋인지 보수적으로 판별"""
     message = (commit.message or "").lower()
@@ -387,7 +401,10 @@ def is_package_metadata_only_commit(commit, changed_files, diff_chars):
         for filename in changed_files
     ]
 
-    if not all(filename in PACKAGE_METADATA_FILES for filename in changed_basenames):
+    if not all(
+        is_package_metadata_file(filename) or is_doc_or_config_file(filename)
+        for filename in changed_files
+    ):
         return False
 
     loc_changed = (commit.loc_added or 0) + (commit.loc_deleted or 0)
@@ -588,7 +605,9 @@ Do not use "truncated" as analysis_status.
 - English technical terms are allowed only when they are natural code/API terms such as except, null, API, DB, JSON, or diff.
 - Do not write generic praise such as "잘 구현되었습니다", "성공적으로 추가되었습니다", or "기능 구현이 잘 되었습니다".
 - Mention one concrete technical reason, limitation, or risk that explains the score or status.
-- For success results, mention one concrete strength and one limitation when possible.
+- For success results, mention the strongest reason for the score; mention a limitation only if it fits concisely.
+- Keep score_reason concise, preferably 40-90 Korean characters.
+- For success results, mention the strongest reason for the score; mention a limitation only if it fits concisely.
 
 Commit type policy:
 
@@ -728,6 +747,8 @@ Scoring guidance:
 - Do not assign 80+ merely because an API endpoint or feature was added; scores above 80 require visible evidence of coherent structure, basic edge-case handling, and maintainability.
 - Do not default to 85 for generally good-looking commits.
 - If timeout handling, pagination, JSON parsing safety, null handling, or error observability is not visible, prefer a score below 85 even when the feature works.
+- Pure rename, API naming cleanup, compatibility wrapper, or small refactor-only commits should not receive 90+ unless they clearly improve behavior, reliability, architecture, or maintainability beyond naming consistency.
+- For small rename/refactor-only commits with tests, prefer 75-84.
 
 Important:
 - Do not reward large LOC by itself.
@@ -905,6 +926,19 @@ def normalize_commit_summary_style(commit_summary):
 
     return summary
 
+def normalize_score_reason_style(score_reason):
+    """score_reason을 내부 검증용으로 짧고 일관되게 정리"""
+    if score_reason is None:
+        return None
+
+    reason = score_reason.strip()
+
+    # 너무 긴 근거는 내부 검증에 필요한 범위까지만 유지
+    if len(reason) > SCORE_REASON_MAX_CHARS:
+        reason = reason[:SCORE_REASON_MAX_CHARS - 1].rstrip() + "…"
+
+    return reason
+
 def validate_commit_analysis_result(result, expected_type=None):
     """커밋 분석 결과 JSON이 저장 가능한 형태인지 검증하고 필요한 값만 정리"""
     if not isinstance(result, dict):
@@ -936,6 +970,8 @@ def validate_commit_analysis_result(result, expected_type=None):
 
     if not isinstance(score_reason, str):
         raise ValueError("score_reason은 문자열이어야 합니다.")
+
+    score_reason = normalize_score_reason_style(score_reason)
 
     if commit_backend_score is not None:
         if not isinstance(commit_backend_score, (int, float)):
@@ -1175,7 +1211,7 @@ def call_openai_for_commit_analysis(commit_input):
         "model": OPENAI_MODEL,
         "instructions": COMMIT_ANALYSIS_SYSTEM_PROMPT,
         "input": user_prompt,
-        "max_output_tokens": 1500,
+        "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
         "store": False,
         "reasoning": {
             "effort": "minimal"
