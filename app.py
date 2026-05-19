@@ -2391,7 +2391,9 @@ def get_project_contributions(project_id):
             commit_data_list.append({
                 "message": commit.message if commit.message else "",
                 "date": commit.committed_at.strftime("%Y-%m-%d %H:%M:%S") if commit.committed_at else None,
-                "commit_summary": commit.commit_summary
+                "commit_summary": commit.commit_summary,
+                "commit_backend_score": commit.commit_backend_score,
+                "analysis_status": commit.analysis_status
             })
         
         total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
