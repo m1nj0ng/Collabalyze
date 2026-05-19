@@ -1511,8 +1511,11 @@ class ContributionData(db.Model):
     pull_requests = db.Column(db.Integer, default=0)
     issues = db.Column(db.Integer, default=0)
     code_reviews = db.Column(db.Integer, default=0)
-    
     collected_at = db.Column(db.DateTime, default=db.func.now())
+    quantitative_score = db.Column(db.Float, nullable=True)              # 정량 지표 기반 개인 점수
+    qualitative_score = db.Column(db.Float, nullable=True)               # NLP/협업 분석 기반 개인 점수
+    final_score = db.Column(db.Float, nullable=True)                     # 최종 종합 점수
+    collab_network = db.Column(db.JSON, nullable=True)                   # 사용자가 다른 사용자에게 보낸 협업 소통 집계
 
 # 테이블 4: 커밋 상세 데이터 (CommitDetail) - AI 문맥 분석용 Deep Data
 class CommitDetail(db.Model):
@@ -1549,6 +1552,7 @@ class PullRequestDetail(db.Model):
     state = db.Column(db.String(20), nullable=False)                     # 상태 (open, closed 등)
     created_at = db.Column(db.DateTime, nullable=False)                  # 작성일
     merged_by = db.Column(db.String(100), nullable=True)                 # merge한 사용자 깃허브 ID
+    pr_summary = db.Column(db.Text, nullable=True)                       # PR 요약
 
 # 테이블 6: 이슈 상세 데이터 (IssueDetail) - AI 문맥 분석용 Deep Data
 class IssueDetail(db.Model):
@@ -1562,6 +1566,7 @@ class IssueDetail(db.Model):
     comments = db.Column(db.Text, nullable=True)                         # 이슈 대화 내역
     state = db.Column(db.String(20), nullable=False)                     # 상태 (open, closed 등)
     created_at = db.Column(db.DateTime, nullable=False)                  # 작성일
+    issue_summary = db.Column(db.Text, nullable=True)                    # 이슈 요약
 
 # ==========================================
 # 3. GitHub OAuth (소셜 로그인) API 라우터
@@ -2393,7 +2398,8 @@ def get_project_contributions(project_id):
                 "date": commit.committed_at.strftime("%Y-%m-%d %H:%M:%S") if commit.committed_at else None,
                 "commit_summary": commit.commit_summary,
                 "commit_backend_score": commit.commit_backend_score,
-                "analysis_status": commit.analysis_status
+                "analysis_status": commit.analysis_status,
+                "changed_files": extract_changed_files(commit.diff_text)
             })
         
         total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
@@ -2422,7 +2428,8 @@ def get_project_contributions(project_id):
                 "comments": pr.comments.split('\n') if pr.comments else [],
                 "state": pr.state,
                 "date": pr.created_at.strftime("%Y-%m-%d %H:%M:%S") if pr.created_at else None,
-                "merged_by": pr.merged_by
+                "merged_by": pr.merged_by,
+                "pr_summary": pr.pr_summary
             })
 
         # [데이터 3] 이슈 내역 (제목, 본문, 댓글, 상태, 날짜)
@@ -2434,28 +2441,33 @@ def get_project_contributions(project_id):
                 "body": issue.body if issue.body else "",
                 "comments": issue.comments.split('\n') if issue.comments else [],
                 "state": issue.state,
-                "date": issue.created_at.strftime("%Y-%m-%d %H:%M:%S") if issue.created_at else None
+                "date": issue.created_at.strftime("%Y-%m-%d %H:%M:%S") if issue.created_at else None,
+                "issue_summary": issue.issue_summary
             })
 
         user_data = {
             "username": c.user.github_id,
             "profile_image": c.user.profile_image,
-            
+            "final_score": c.final_score,
+
             "1_quantitative_data": {
                 "commits": c.commits,
                 "pull_requests": c.pull_requests,
                 "issues": c.issues,
                 "code_reviews": c.code_reviews,
                 "loc_added": c.loc_added,
-                "loc_deleted": c.loc_deleted
+                "loc_deleted": c.loc_deleted,
+                "quantitative_score": c.quantitative_score
             },
-            
+
             "2_nlp_data": {
-                "commits": commit_data_list,  # 'commit_messages' 대신 구조화된 'commits' 사용
-                "pull_requests": pr_data_list, 
-                "issues": issue_data_list       
+                "commits": commit_data_list,
+                "pull_requests": pr_data_list,
+                "issues": issue_data_list,
+                "qualitative_score": c.qualitative_score,
+                "collab_network": c.collab_network or []
             },
-            
+
             "3_static_code_analysis_data": {
                 "total_complexity_score": total_complexity,
                 "backend_code_score": backend_code_score
