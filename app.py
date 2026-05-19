@@ -23,6 +23,7 @@ CORS(app) # 모든 도메인에서 오는 요청 허용
 # ==========================================
 app.json.ensure_ascii = False  # 한글이 \uXXXX 로 깨지는 현상 방지
 app.json.compact = False       # 자동으로 들여쓰기(Pretty Print) 적용
+app.json.sort_keys = False     # JSON key 순서를 코드 작성 순서대로 유지
 
 # ==========================================
 # 1. 데이터베이스 설정
@@ -2374,6 +2375,247 @@ def analyze_static_code(project_id):
     })
 
 # ==========================================
+# 5.5. AI 팀원 분석 결과 저장 API 라우터 (POST)
+# ==========================================
+def normalize_optional_score(value, field_name):
+    """AI 분석 점수 입력값을 0~100 범위의 float 또는 None으로 정리"""
+    if value is None:
+        return None
+
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name}은 숫자 또는 null이어야 합니다.")
+
+    if value < 0 or value > 100:
+        raise ValueError(f"{field_name}은 0 이상 100 이하이어야 합니다.")
+
+    return float(value)
+
+
+def normalize_optional_text(value, field_name):
+    """요약 텍스트 입력값을 문자열 또는 None으로 정리"""
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name}은 문자열 또는 null이어야 합니다.")
+
+    return value.strip()
+
+
+def normalize_collab_network(value):
+    """협업 네트워크 입력값을 프론트 시각화에 쓰기 쉬운 JSON 배열로 정리"""
+    if value is None:
+        return None
+
+    if not isinstance(value, list):
+        raise ValueError("collab_network는 배열이어야 합니다.")
+
+    normalized_network = []
+
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"collab_network[{index}]는 객체여야 합니다.")
+
+        target_username = item.get("target_username")
+        if not isinstance(target_username, str) or not target_username.strip():
+            raise ValueError(f"collab_network[{index}].target_username은 필수 문자열입니다.")
+
+        comment_count = item.get("comment_count", 0)
+        review_count = item.get("review_count", 0)
+        issue_comment_count = item.get("issue_comment_count", 0)
+
+        for field_name, count_value in (
+            ("comment_count", comment_count),
+            ("review_count", review_count),
+            ("issue_comment_count", issue_comment_count)
+        ):
+            if not isinstance(count_value, (int, float)):
+                raise ValueError(f"collab_network[{index}].{field_name}은 숫자여야 합니다.")
+
+            if count_value < 0:
+                raise ValueError(f"collab_network[{index}].{field_name}은 0 이상이어야 합니다.")
+
+        weight = item.get("weight")
+        if weight is None:
+            weight = comment_count + review_count + issue_comment_count
+
+        if not isinstance(weight, (int, float)):
+            raise ValueError(f"collab_network[{index}].weight는 숫자여야 합니다.")
+
+        if weight < 0:
+            raise ValueError(f"collab_network[{index}].weight는 0 이상이어야 합니다.")
+
+        normalized_network.append({
+            "target_username": target_username.strip(),
+            "comment_count": comment_count,
+            "review_count": review_count,
+            "issue_comment_count": issue_comment_count,
+            "weight": weight
+        })
+
+    return normalized_network
+
+
+@app.route('/api/projects/<int:project_id>/ai-analysis', methods=['POST'])
+def update_ai_analysis(project_id):
+    """
+    AI 팀원이 산출한 정량/정성 점수, 협업 네트워크, PR/Issue 요약을 DB에 반영하는 API
+    전달된 필드만 부분 업데이트하고, 없는 필드는 기존 값을 유지한다.
+    """
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({"error": "해당 프로젝트를 찾을 수 없습니다."}), 404
+
+    data = request.get_json(silent=True) or {}
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "요청 본문은 JSON 객체여야 합니다."}), 400
+
+    users_payload = data.get("users", [])
+    pull_requests_payload = data.get("pull_requests", [])
+    issues_payload = data.get("issues", [])
+
+    if not isinstance(users_payload, list):
+        return jsonify({"error": "users는 배열이어야 합니다."}), 400
+
+    if not isinstance(pull_requests_payload, list):
+        return jsonify({"error": "pull_requests는 배열이어야 합니다."}), 400
+
+    if not isinstance(issues_payload, list):
+        return jsonify({"error": "issues는 배열이어야 합니다."}), 400
+
+    updated = {
+        "users": 0,
+        "pull_requests": 0,
+        "issues": 0
+    }
+
+    not_found = {
+        "users": [],
+        "pull_requests": [],
+        "issues": []
+    }
+
+    try:
+        # 1. 사용자별 점수/협업 네트워크 업데이트
+        for user_item in users_payload:
+            if not isinstance(user_item, dict):
+                raise ValueError("users 배열의 각 항목은 객체여야 합니다.")
+
+            username = user_item.get("username")
+            if not isinstance(username, str) or not username.strip():
+                raise ValueError("users 항목에는 username 문자열이 필요합니다.")
+
+            user = User.query.filter_by(github_id=username.strip()).first()
+            if not user:
+                not_found["users"].append(username)
+                continue
+
+            contribution = ContributionData.query.filter_by(
+                user_id=user.id,
+                project_id=project.id
+            ).first()
+
+            if not contribution:
+                not_found["users"].append(username)
+                continue
+
+            if "quantitative_score" in user_item:
+                contribution.quantitative_score = normalize_optional_score(
+                    user_item.get("quantitative_score"),
+                    "quantitative_score"
+                )
+
+            if "qualitative_score" in user_item:
+                contribution.qualitative_score = normalize_optional_score(
+                    user_item.get("qualitative_score"),
+                    "qualitative_score"
+                )
+
+            if "final_score" in user_item:
+                contribution.final_score = normalize_optional_score(
+                    user_item.get("final_score"),
+                    "final_score"
+                )
+
+            if "collab_network" in user_item:
+                contribution.collab_network = normalize_collab_network(
+                    user_item.get("collab_network")
+                )
+
+            updated["users"] += 1
+
+        # 2. PR 요약 업데이트
+        for pr_item in pull_requests_payload:
+            if not isinstance(pr_item, dict):
+                raise ValueError("pull_requests 배열의 각 항목은 객체여야 합니다.")
+
+            pr_number = pr_item.get("pr_number")
+            if not isinstance(pr_number, int):
+                raise ValueError("pull_requests 항목에는 pr_number 정수가 필요합니다.")
+
+            pr = PullRequestDetail.query.filter_by(
+                project_id=project.id,
+                pr_number=pr_number
+            ).first()
+
+            if not pr:
+                not_found["pull_requests"].append(pr_number)
+                continue
+
+            if "pr_summary" in pr_item:
+                pr.pr_summary = normalize_optional_text(
+                    pr_item.get("pr_summary"),
+                    "pr_summary"
+                )
+
+            updated["pull_requests"] += 1
+
+        # 3. Issue 요약 업데이트
+        for issue_item in issues_payload:
+            if not isinstance(issue_item, dict):
+                raise ValueError("issues 배열의 각 항목은 객체여야 합니다.")
+
+            issue_number = issue_item.get("issue_number")
+            if not isinstance(issue_number, int):
+                raise ValueError("issues 항목에는 issue_number 정수가 필요합니다.")
+
+            issue = IssueDetail.query.filter_by(
+                project_id=project.id,
+                issue_number=issue_number
+            ).first()
+
+            if not issue:
+                not_found["issues"].append(issue_number)
+                continue
+
+            if "issue_summary" in issue_item:
+                issue.issue_summary = normalize_optional_text(
+                    issue_item.get("issue_summary"),
+                    "issue_summary"
+                )
+
+            updated["issues"] += 1
+
+        db.session.commit()
+
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"AI 분석 결과 저장 중 오류가 발생했습니다: {str(e)}"}), 500
+
+    return jsonify({
+        "status": "success",
+        "project_id": project.id,
+        "project_name": project.name,
+        "updated": updated,
+        "not_found": not_found,
+        "message": "AI 분석 결과를 저장했습니다."
+    })
+
+# ==========================================
 # 6. 프로젝트 기여도 데이터 조회 API (GET) - 시간 및 상태 정보 포함 버전
 # ==========================================
 @app.route('/api/projects/<int:project_id>/contributions', methods=['GET'])
@@ -2423,6 +2665,7 @@ def get_project_contributions(project_id):
         pr_data_list = []
         for pr in prs:
             pr_data_list.append({
+                "pr_number": pr.pr_number,
                 "title": pr.title,
                 "body": pr.body if pr.body else "",
                 "comments": pr.comments.split('\n') if pr.comments else [],
@@ -2437,6 +2680,7 @@ def get_project_contributions(project_id):
         issue_data_list = []
         for issue in issues:
             issue_data_list.append({
+                "issue_number": issue.issue_number,
                 "title": issue.title,
                 "body": issue.body if issue.body else "",
                 "comments": issue.comments.split('\n') if issue.comments else [],
