@@ -94,10 +94,14 @@ const MainPage = () => {
     navigate('/loading', { state: { repoUrl: url } });
   };
 
-  const handleDeleteHistory = (e, url) => {
+  const handleDeleteHistory = (e, id, url, date) => {
     e.stopPropagation(); // 부모 div의 클릭 이벤트(페이지 이동)가 발생하지 않도록 방지
     if (window.confirm('이 분석 기록을 삭제하시겠습니까?')) {
-      setHistory(prevHistory => prevHistory.filter(item => item.url !== url));
+      setHistory(prevHistory => prevHistory.filter(item => {
+        // 고유 ID가 있으면 ID로 비교하고, 없으면(기존 데이터) URL과 날짜 조합으로 비교하여 삭제합니다.
+        if (item.id && id) return item.id !== id;
+        return !(item.url === url && item.date === date);
+      }));
     }
   };
 
@@ -109,6 +113,7 @@ const MainPage = () => {
 
     // 분석 시작 시 현재 리포지토리를 최근 분석 기록에 추가
     const newHistoryItem = {
+      id: Date.now(), // 개별 분석 건을 식별하기 위한 고유 ID 추가
       name: repoUrl.split('/').pop(), // URL에서 리포지토리 이름 추출
       url: repoUrl,
       date: new Date().toLocaleString('ko-KR', {
@@ -117,15 +122,13 @@ const MainPage = () => {
         day: '2-digit',
         hour: '2-digit',
         minute: '2-digit',
-        hour12: true // 오전/오후 표시로 가독성 향상
+        hour12: true
       }), 
     };
 
-    // 이미 기록에 있는 항목이라면 제거하고, 새로운 항목을 가장 최근으로 추가
+    // 동일한 프로젝트라도 분석 시점마다 별개의 기록으로 남기기 위해 필터링 로직을 제거했습니다.
     setHistory(prevHistory => {
-      const filteredHistory = prevHistory.filter(item => item.url !== repoUrl);
-      // 최대 5개 정도의 기록만 유지하도록 제한할 수도 있습니다. (예: .slice(0, 4))
-      return [newHistoryItem, ...filteredHistory];
+      return [newHistoryItem, ...prevHistory].slice(0, 10); // 최근 10개까지 기록을 유지합니다.
     });
     goToAnalysis(repoUrl);
   };
@@ -194,8 +197,8 @@ const MainPage = () => {
             <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
               {history.map((item, idx) => (
                 <div 
-                  key={idx} 
-                  onClick={() => navigate('/dashboard', { state: { repoUrl: item.url, fromHistory: true } })}
+                  key={item.id || idx} 
+                  onClick={() => navigate('/dashboard', { state: { repoUrl: item.url, analysisDate: item.date, fromHistory: true } })}
                   style={{ 
                     padding: '16px 20px', 
                     borderBottom: idx === history.length - 1 ? 'none' : '1px solid #f1f5f9', 
@@ -213,7 +216,7 @@ const MainPage = () => {
                     <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>{item.date}</span>
                   </div>
                   <button 
-                    onClick={(e) => handleDeleteHistory(e, item.url)}
+                    onClick={(e) => handleDeleteHistory(e, item.id, item.url, item.date)}
                     style={{ 
                       padding: '6px 10px', 
                       backgroundColor: 'transparent', 

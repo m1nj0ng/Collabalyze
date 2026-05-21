@@ -21,11 +21,11 @@ const DashboardPage = () => {
 
   // Mock Data
   const dashboardData = [
-    { id: 1, name: 'Alice', commits: 120, reviews: 15, issues: 5, score: 95 }, 
-    { id: 2, name: 'Bob', commits: 80, reviews: 30, issues: 12, score: 88 }, 
-    { id: 3, name: 'Charlie', commits: 45, reviews: 10, issues: 20, score: 72 },
-    { id: 4, name: 'Dave', commits: 110, reviews: 40, issues: 8, score: 92 },
-    { id: 5, name: 'Eve', commits: 65, reviews: 55, issues: 3, score: 89 },
+    { id: 1, name: 'Alice', commits: 120, reviews: 15, issues: 5, score: 95, collaborationScore: 90 }, 
+    { id: 2, name: 'Bob', commits: 80, reviews: 30, issues: 12, score: 88, collaborationScore: 95 }, 
+    { id: 3, name: 'Charlie', commits: 45, reviews: 10, issues: 20, score: 72, collaborationScore: 80 },
+    { id: 4, name: 'Dave', commits: 110, reviews: 40, issues: 8, score: 92, collaborationScore: 85 },
+    { id: 5, name: 'Eve', commits: 65, reviews: 55, issues: 3, score: 89, collaborationScore: 92 },
   ];
 
   return (
@@ -56,7 +56,7 @@ const DashboardPage = () => {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
               <h3 style={{ margin: 0, fontSize: '1rem', color: '#1e293b' }}>상세 협업 네트워크 분석</h3>
               <div style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                <span style={{ marginRight: '15px' }}>● 노드 크기: 기여 점수</span>
+                <span style={{ marginRight: '15px' }}>● 노드 크기: 협업 점수</span>
                 <span>━ 선 두께: 리뷰 빈도</span>
               </div>
             </div>

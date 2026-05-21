@@ -9,7 +9,8 @@ export const ActivityPieChart = ({ data }) => {
     '#14b8a6', '#f97316', '#0ea5e9', '#d946ef', '#2dd4bf'
   ];
   
-  const chartData = data.map(m => ({ name: m.name, value: m.commits }));
+  // 기여도 분포를 커밋 횟수가 아닌 종합 기여 점수(score) 기반으로 변경
+  const chartData = data.map(m => ({ name: m.name, value: m.score }));
 
   return (
     <div style={{ width: '100%', height: 250 }}>

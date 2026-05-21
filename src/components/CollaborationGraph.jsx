@@ -3,20 +3,20 @@ import React, { useState, useRef, useEffect } from 'react';
 const CollaborationGraph = ({ data }) => {
   const svgRef = useRef(null);
   const [nodes, setNodes] = useState([
-    { id: 'Alice', x: 200, y: 100, color: '#4f46e5', score: 95 },
-    { id: 'Bob', x: 300, y: 200, color: '#10b981', score: 88 },
-    { id: 'Charlie', x: 200, y: 300, color: '#f59e0b', score: 72 },
-    { id: 'Dave', x: 100, y: 200, color: '#ef4444', score: 92 },
-    { id: 'Eve', x: 100, y: 320, color: '#8b5cf6', score: 89 },
+    { id: 'Alice', x: 200, y: 100, color: '#4f46e5', collaborationScore: 90 },
+    { id: 'Bob', x: 300, y: 200, color: '#10b981', collaborationScore: 95 },
+    { id: 'Charlie', x: 200, y: 300, color: '#f59e0b', collaborationScore: 80 },
+    { id: 'Dave', x: 100, y: 200, color: '#ef4444', collaborationScore: 85 },
+    { id: 'Eve', x: 100, y: 320, color: '#8b5cf6', collaborationScore: 92 },
   ]);
 
   const links = [
-    { source: 'Alice', target: 'Bob', value: 4 },
-    { source: 'Bob', target: 'Charlie', value: 2 },
-    { source: 'Charlie', target: 'Alice', value: 2 },
-    { source: 'Dave', target: 'Alice', value: 5, bidirectional: true }, // 양방향 관계 추가
-    { source: 'Eve', target: 'Bob', value: 3 },
-    { source: 'Alice', target: 'Eve', value: 2 },
+    { source: 'Alice', target: 'Bob', sToT: 3, tToS: 1, value: 4, bidirectional: true },
+    { source: 'Bob', target: 'Charlie', sToT: 2, tToS: 0, value: 2 },
+    { source: 'Charlie', target: 'Alice', sToT: 2, tToS: 0, value: 2 },
+    { source: 'Dave', target: 'Alice', sToT: 3, tToS: 2, value: 5, bidirectional: true },
+    { source: 'Eve', target: 'Bob', sToT: 3, tToS: 0, value: 3 },
+    { source: 'Alice', target: 'Eve', sToT: 1, tToS: 1, value: 2, bidirectional: true },
   ];
   
   const [viewBox, setViewBox] = useState({ x: 0, y: 0, w: 400, h: 400 });
@@ -112,7 +112,8 @@ const CollaborationGraph = ({ data }) => {
             orient="auto-start-reverse"
             markerUnits="userSpaceOnUse" // 선 두께에 상관없이 화살표 크기 고정
           >
-            <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8" />
+            <path d="M0,0 L10,5 L0,10 Z" fill="#cbd5e1" />
+            <path d="M0,0 L10,5 L0,10 Z" fill="#64748b" />
           </marker>
         </defs>
         
@@ -126,8 +127,8 @@ const CollaborationGraph = ({ data }) => {
           const dy = t.y - s.y;
           const dist = Math.sqrt(dx * dx + dy * dy);
           
-          const sourceR = getRadius(s.score) + 3;
-          const targetR = getRadius(t.score) + 3;
+          const sourceR = getRadius(s.collaborationScore) + 3;
+          const targetR = getRadius(t.collaborationScore) + 3;
           
           const x1 = s.x + (dx * sourceR) / dist;
           const y1 = s.y + (dy * sourceR) / dist;
@@ -141,12 +142,16 @@ const CollaborationGraph = ({ data }) => {
               y1={y1}
               x2={x2} 
               y2={y2}
-              stroke="#e2e8f0"
+              stroke="#cbd5e1"
+              strokeOpacity="0.6"
               strokeWidth={link.value * 4} // 두께 차이를 더 극명하게 조정 (2.5 -> 4)
               markerStart={link.bidirectional ? "url(#arrowhead)" : undefined}
               markerEnd="url(#arrowhead)"
             >
-              <title>{link.source} ↔ {link.target}: {link.value} Reviews</title>
+              <title>
+                {`${link.source} → ${link.target}: ${link.sToT || link.value}회`}
+                {link.tToS ? `\n${link.target} → ${link.source}: ${link.tToS}회` : ''}
+              </title>
             </line>
           );
         })}
@@ -158,14 +163,18 @@ const CollaborationGraph = ({ data }) => {
             onMouseDown={onMouseDown(node.id)}
             style={{ cursor: draggingNode === node.id ? 'grabbing' : 'grab' }}
           >
+            <title>{`${node.id}: 협업 점수 ${node.collaborationScore}점`}</title>
             <circle
               cx={node.x}
               cy={node.y}
-              r={getRadius(node.score)} 
+              r={getRadius(node.collaborationScore)} 
               fill="white"
               stroke={node.color}
-              strokeWidth="3"
-              style={{ filter: 'drop-shadow(0px 2px 3px rgba(0,0,0,0.1))' }}
+              strokeWidth={draggingNode === node.id ? "4" : "3"}
+              style={{ 
+                filter: draggingNode === node.id ? 'drop-shadow(0px 4px 6px rgba(0,0,0,0.2))' : 'drop-shadow(0px 2px 3px rgba(0,0,0,0.1))',
+                transition: 'filter 0.2s, stroke-width 0.2s'
+              }}
             />
             <text
               x={node.x}
@@ -179,10 +188,10 @@ const CollaborationGraph = ({ data }) => {
             </text>
             <text
               x={node.x}
-              y={node.y + getRadius(node.score) + 15}
+              y={node.y + getRadius(node.collaborationScore) + 16}
               textAnchor="middle"
               fill="#475569"
-              style={{ fontSize: '11px', fontWeight: '600' }}
+              style={{ fontSize: '11px', fontWeight: '600', pointerEvents: 'none' }}
             >
               {node.id}
             </text>

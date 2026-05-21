@@ -1,24 +1,75 @@
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import UserInsightCard from '../components/UserInsightCard';
 
-// 활동 세부 내역을 보여주는 서브 컴포넌트
-const ActivitySection = ({ title, items, icon }) => (
-  <div style={{ padding: '24px', backgroundColor: '#ffffff', borderRadius: '16px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', border: '1px solid #e2e8f0' }}>
-    <h3 style={{ marginTop: 0, marginBottom: '15px', fontSize: '1rem', color: '#1e293b', display: 'flex', alignItems: 'center', gap: '8px' }}>
-      <span style={{ fontSize: '1.2rem' }}>{icon}</span> {title}
-    </h3>
-    <ul style={{ paddingLeft: '20px', margin: 0 }}>
-      {items && items.length > 0 ? (
-        items.map((item, i) => (
-          <li key={i} style={{ marginBottom: '8px', color: '#475569', fontSize: '0.9rem', lineHeight: '1.4' }}>{item}</li>
-        ))
-      ) : (
-        <li style={{ color: '#94a3b8', fontSize: '0.9rem', listStyle: 'none', marginLeft: '-20px' }}>기록이 없습니다.</li>
-      )}
-    </ul>
-  </div>
-);
+const FilteredActivityList = ({ logs }) => {
+  const [filter, setFilter] = useState('All');
+
+  // logs 객체를 단일 배열로 평탄화하고 타입(배지 디자인) 부여
+  const activities = useMemo(() => {
+    const prs = (logs?.pullRequests || []).map(text => ({ type: 'PR', text, color: '#10b981', bg: '#d1fae5' }));
+    const issues = (logs?.issues || []).map(text => ({ type: 'Issue', text, color: '#ef4444', bg: '#fee2e2' }));
+    const commits = (logs?.commits || []).map(text => ({ type: 'Commit', text, color: '#4f46e5', bg: '#eef2ff' }));
+    
+    // 시간별로 진행된 것처럼 보이도록 각 항목을 하나씩 교차로 섞어 배열 완성 (Mock Data 시각적 처리)
+    const maxLength = Math.max(prs.length, issues.length, commits.length);
+    const combined = [];
+    for (let i = 0; i < maxLength; i++) {
+      if (prs[i]) combined.push(prs[i]);
+      if (issues[i]) combined.push(issues[i]);
+      if (commits[i]) combined.push(commits[i]);
+    }
+    return combined;
+  }, [logs]);
+
+  const filteredActivities = activities.filter(a => filter === 'All' || a.type === filter);
+
+  return (
+    <div style={{ padding: '30px', backgroundColor: '#ffffff', borderRadius: '16px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', border: '1px solid #e2e8f0', marginTop: '30px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+        <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#1e293b' }}>상세 활동 내역 (통합 타임라인)</h3>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          {['All', 'PR', 'Issue', 'Commit'].map(f => (
+            <button 
+              key={f} 
+              onClick={() => setFilter(f)}
+              style={{ 
+                padding: '6px 14px', 
+                borderRadius: '20px', 
+                border: filter === f ? 'none' : '1px solid #cbd5e1', 
+                backgroundColor: filter === f ? '#1e293b' : '#ffffff', 
+                color: filter === f ? '#ffffff' : '#64748b',
+                fontSize: '0.85rem',
+                fontWeight: '600',
+                cursor: 'pointer',
+                transition: 'all 0.2s'
+              }}
+            >
+              {f === 'All' ? '전체' : f}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ maxHeight: '350px', overflowY: 'auto', paddingRight: '10px' }}>
+        {filteredActivities.length > 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {filteredActivities.map((item, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '14px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9' }}>
+                <span style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: item.bg, color: item.color, fontSize: '0.75rem', fontWeight: 'bold', minWidth: '55px', textAlign: 'center' }}>
+                  {item.type}
+                </span>
+                <span style={{ color: '#334155', fontSize: '0.95rem' }}>{item.text}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ padding: '30px', textAlign: 'center', color: '#94a3b8', fontSize: '0.95rem', backgroundColor: '#f8fafc', borderRadius: '10px' }}>해당 활동 기록이 없습니다.</div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 const DetailPage = () => {
   const { memberId } = useParams();
@@ -27,11 +78,11 @@ const DetailPage = () => {
   // 멤버별 데이터 매핑
   const getMemberPersona = (name) => {
     const personaMap = {
-      "Alice": { label: '핵심 아키텍트', color: '#4F46E5', bg: '#EEF2FF' },
-      "Bob": { label: '전문 리뷰어', color: '#D97706', bg: '#FFFBEB' },
-      "Charlie": { label: '버그 헌터', color: '#DC2626', bg: '#FEF2F2' },
-      "Dave": { label: '인프라 마스터', color: '#059669', bg: '#ECFDF5' },
-      "Eve": { label: 'UI/UX 디자이너', color: '#0891B2', bg: '#ECFEFF' }
+      "Alice": { label: '핵심 아키텍트', color: '#166534', bg: '#dcfce7' },
+      "Bob": { label: '전문 리뷰어', color: '#075985', bg: '#e0f2fe' },
+      "Charlie": { label: '버그 헌터', color: '#991b1b', bg: '#fee2e2' },
+      "Dave": { label: '인프라 마스터', color: '#854d0e', bg: '#fef9c3' },
+      "Eve": { label: 'UI/UX 디자이너', color: '#10b981', bg: '#d1fae5' }
     };
     return personaMap[name] || { label: '안정적 협업자', color: '#0369a1', bg: '#e0f2fe' };
   };
@@ -137,9 +188,29 @@ const DetailPage = () => {
       activities: ["공통 컴포넌트 라이브러리 제작", "접근성 검사 수행", "메인 대시보드 UI 구현"],
       metrics: { testCoverage: "88%", reviewCount: 95, avgResponseTime: "2.5h" },
       detailedLogs: {
-        pullRequests: ["PR #22: 다크모드 테마 적용", "PR #18: 차트 라이브러리 교체"],
-        issues: ["Issue #12: 폰트 렌더링 최적화"],
-        commits: ["feat: 디자인 시스템 1.0 배포", "refactor: 컬러 변수 정리"]
+        pullRequests: [
+          "PR #22: 다크모드 테마 적용", 
+          "PR #18: 차트 라이브러리 교체",
+          "PR #15: 공통 UI 컴포넌트 모듈화",
+          "PR #14: 접근성(A11y) 가이드라인 적용",
+          "PR #11: 메인 페이지 반응형 디자인 적용"
+        ],
+        issues: [
+          "Issue #12: 폰트 렌더링 최적화",
+          "Issue #9: 특정 브라우저에서 버튼 정렬 깨짐 제보",
+          "Issue #5: 다크모드 전환 시 번쩍임 현상 완화 필요"
+        ],
+        commits: [
+          "feat: 디자인 시스템 1.0 배포", 
+          "refactor: 컬러 변수 정리",
+          "fix: 모바일 해상도 네비게이션 바 겹침 버그 수정",
+          "style: Primary 버튼 호버 애니메이션 추가",
+          "chore: 미사용 SVG 아이콘 에셋 제거",
+          "feat: 모달 컴포넌트 접근성(aria-label) 속성 추가",
+          "docs: UI 스토리북(Storybook) 문서화 업데이트",
+          "test: 주요 화면 UI 스냅샷 테스트 추가",
+          "fix: 텍스트 입력 창 포커스 아웃라인 일관성 유지"
+        ]
       }
     }
   };
@@ -194,11 +265,7 @@ const DetailPage = () => {
           </ul>
         </div>
 
-        <div className="detailed-activity-section" style={{ marginTop: '30px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px' }}>
-          <ActivitySection title="Pull Requests" items={member.detailedLogs?.pullRequests} icon="🔀" />
-          <ActivitySection title="Issues" items={member.detailedLogs?.issues} icon="🎫" />
-          <ActivitySection title="Commits" items={member.detailedLogs?.commits} icon="📝" />
-        </div>
+        <FilteredActivityList logs={member.detailedLogs} />
       </div>
     </div>
   );
