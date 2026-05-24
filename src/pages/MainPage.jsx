@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getUserRepos } from '../api/client';
+import axios from 'axios';
 
 const MainPage = () => {
   const [repoUrl, setRepoUrl] = useState('');
@@ -47,8 +47,9 @@ const MainPage = () => {
 
   const fetchUserRepos = async (userId) => {
     try {
-      const response = await getUserRepos(userId);
-      if (response.data.status === 'success') {
+      // Axios를 사용하여 직접 백엔드 API에서 사용자의 리포지토리 목록 호출
+      const response = await axios.get(`http://3.39.190.222:5000/api/users/${userId}/repos`);
+      if (response.data && response.data.repos) {
         setUserRepos(response.data.repos);
       }
     } catch (error) {
@@ -74,8 +75,7 @@ const MainPage = () => {
 
   const handleLogin = () => {
     // 백엔드 인증 페이지로 이동
-    // 상대 경로를 사용하면 Vercel 프록시를 통해 전달될 수 있습니다.
-    window.location.href = '/api/auth/github';
+    window.location.href = 'http://3.39.190.222:5000/api/auth/github';
   };
 
   const handleLogout = () => {
@@ -111,25 +111,6 @@ const MainPage = () => {
     }
     if (!repoUrl) return alert('리포지토리를 선택하거나 URL을 입력해주세요.');
 
-    // 분석 시작 시 현재 리포지토리를 최근 분석 기록에 추가
-    const newHistoryItem = {
-      id: Date.now(), // 개별 분석 건을 식별하기 위한 고유 ID 추가
-      name: repoUrl.split('/').pop(), // URL에서 리포지토리 이름 추출
-      url: repoUrl,
-      date: new Date().toLocaleString('ko-KR', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true
-      }), 
-    };
-
-    // 동일한 프로젝트라도 분석 시점마다 별개의 기록으로 남기기 위해 필터링 로직을 제거했습니다.
-    setHistory(prevHistory => {
-      return [newHistoryItem, ...prevHistory].slice(0, 10); // 최근 10개까지 기록을 유지합니다.
-    });
     goToAnalysis(repoUrl);
   };
 
@@ -162,7 +143,8 @@ const MainPage = () => {
                   >
                     <option value="">-- 분석할 리포지토리 선택 --</option>
                     {userRepos.map((repo, idx) => (
-                      <option key={idx} value={repo.url}>{repo.name}</option>
+                      // 백엔드에서 내려주는 데이터 키값에 따라 유연하게 매핑하도록 보완 (url/html_url)
+                      <option key={idx} value={repo.url || repo.html_url}>{repo.name || repo.full_name}</option>
                     ))}
                   </select>
                 </div>
@@ -198,7 +180,15 @@ const MainPage = () => {
               {history.map((item, idx) => (
                 <div 
                   key={item.id || idx} 
-                  onClick={() => navigate('/dashboard', { state: { repoUrl: item.url, analysisDate: item.date, fromHistory: true } })}
+                  onClick={() => {
+                    if (item.projectId) {
+                      // projectId가 있으면 로딩 없이 과거 분석 결과 대시보드로 바로 이동
+                      navigate('/dashboard', { state: { projectId: item.projectId, repoUrl: item.url } });
+                    } else {
+                      // 과거에 저장되어 projectId가 없는 기록은 재분석 진행
+                      navigate('/loading', { state: { repoUrl: item.url } });
+                    }
+                  }}
                   style={{ 
                     padding: '16px 20px', 
                     borderBottom: idx === history.length - 1 ? 'none' : '1px solid #f1f5f9', 

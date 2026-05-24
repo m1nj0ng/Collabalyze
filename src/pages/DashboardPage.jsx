@@ -1,5 +1,6 @@
-import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import axios from 'axios';
 import ProjectOverview from '../components/ProjectOverview';
 import ActivityTimeline from '../components/ActivityTimeline';
 import CollaborationGraph from '../components/CollaborationGraph';
@@ -7,7 +8,16 @@ import { ActivityPieChart } from '../components/Charts';
 
 const DashboardPage = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   
+  // 이전 페이지(LoadingPage)에서 전달받은 projectId
+  const projectId = location.state?.projectId;
+
+  const [dashboardData, setDashboardData] = useState([]);
+  const [timelineData, setTimelineData] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
   // 역할 판별 로직 (Persona Logic)
   const getMemberPersona = (member) => {
     if (member.score >= 95) return { label: '핵심 아키텍트', color: '#4f46e5', bg: '#eef2ff' };
@@ -15,18 +25,134 @@ const DashboardPage = () => {
     if (member.issues >= 15) return { label: '버그 헌터', color: '#991b1b', bg: '#fee2e2' };
     if (member.reviews >= 25) return { label: '전문 리뷰어', color: '#075985', bg: '#e0f2fe' };
     if (member.commits >= 100) return { label: '코드 머신', color: '#854d0e', bg: '#fef9c3' };
-    if (member.name === 'Charlie') return { label: '성장하는 동료', color: '#7c3aed', bg: '#f5f3ff' };
+    if (!member.score) return { label: '분석 대기 중', color: '#64748b', bg: '#f1f5f9' }; // 분석 완료 전 처리
     return { label: '안정적 협업자', color: '#0369a1', bg: '#e0f2fe' };
   };
 
-  // Mock Data
-  const dashboardData = [
-    { id: 1, name: 'Alice', commits: 120, reviews: 15, issues: 5, score: 95, collaborationScore: 90 }, 
-    { id: 2, name: 'Bob', commits: 80, reviews: 30, issues: 12, score: 88, collaborationScore: 95 }, 
-    { id: 3, name: 'Charlie', commits: 45, reviews: 10, issues: 20, score: 72, collaborationScore: 80 },
-    { id: 4, name: 'Dave', commits: 110, reviews: 40, issues: 8, score: 92, collaborationScore: 85 },
-    { id: 5, name: 'Eve', commits: 65, reviews: 55, issues: 3, score: 89, collaborationScore: 92 },
-  ];
+  useEffect(() => {
+    if (!projectId) {
+      setError('유효한 프로젝트 ID가 없습니다. 분석을 다시 진행해주세요.');
+      setIsLoading(false);
+      return;
+    }
+
+    const fetchContributions = async () => {
+      try {
+        setIsLoading(true);
+        const response = await axios.get(`http://3.39.190.222:5000/api/projects/${projectId}/contributions`);
+        
+        // 응답 데이터가 배열 형태(data)로 온다고 가정
+        const apiData = response.data?.data || response.data || [];
+        
+        const mappedData = apiData.map((item, index) => {
+          const quant = item['1_quantitative_data'] || {};
+          const nlp = item['2_nlp_data'] || {};
+          const staticCode = item['3_static_code_analysis_data'] || {};
+
+          return {
+            id: item.username || `User ${index + 1}`,
+            name: item.username || `User ${index + 1}`,
+            profileImage: item.profile_image || null,
+            
+            // 1. 정량적 데이터 매핑
+            commits: quant.commits || 0,
+            pullRequests: quant.pull_requests || 0,
+            reviews: quant.code_reviews || 0,
+            issues: quant.issues || 0,
+            locAdded: quant.loc_added || 0,
+            locDeleted: quant.loc_deleted || 0,
+            
+            // 2. 점수 데이터 (분석 전 null 대비)
+            score: item.final_score || 0,
+            backendCodeScore: staticCode.backend_code_score || null,
+            
+            // 3. NLP 및 요약 데이터 (null 필터링 적용)
+            collabNetwork: nlp.collab_network || [],
+            commitSummaries: (nlp.commits || []).map(c => c.commit_summary).filter(Boolean),
+            changedFiles: (nlp.commits || []).flatMap(c => c.changed_files || []),
+            prSummaries: (nlp.pull_requests || []).map(pr => pr.pr_summary).filter(Boolean),
+            issueSummaries: (nlp.issues || []).map(i => i.issue_summary).filter(Boolean),
+          };
+        });
+
+        // 커밋 날짜(date) 데이터를 활용하여 실제 타임라인 데이터 동적 생성
+        const allCommits = apiData.flatMap(user => user['2_nlp_data']?.commits || []);
+        if (allCommits.length > 0) {
+          const monthlyCounts = {};
+          const weeklyCounts = {};
+          const dailyCounts = {};
+          
+          allCommits.forEach(c => {
+            if (!c.date) return;
+            
+            // 브라우저 호환성을 위해 날짜 문자열 공백을 'T'로 변환 (예: "2026-05-19 12:00:00" -> "2026-05-19T12:00:00")
+            const validDateStr = c.date.replace(' ', 'T');
+            const d = new Date(validDateStr);
+            if (isNaN(d.getTime())) return; // 유효하지 않은 날짜 필터링
+
+            // 1. 월별 (YYYY-MM)
+            const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            monthlyCounts[monthKey] = (monthlyCounts[monthKey] || 0) + 1;
+            
+            // 2. 일별 (YYYY-MM-DD)
+            const dayKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            dailyCounts[dayKey] = (dailyCounts[dayKey] || 0) + 1;
+            
+            // 3. 주별 (해당 주의 월요일 기준 YYYY-MM-DD)
+            const dCopy = new Date(d.getTime());
+            const day = dCopy.getDay();
+            const diffToMonday = dCopy.getDate() - day + (day === 0 ? -6 : 1);
+            const monday = new Date(dCopy.setDate(diffToMonday));
+            const weekKey = `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+            weeklyCounts[weekKey] = (weeklyCounts[weekKey] || 0) + 1;
+          });
+          
+          const monthlyTimeline = Object.keys(monthlyCounts).sort().map(key => ({
+            date: `${key.split('-')[0].substring(2)}년 ${key.split('-')[1]}월`, // 예: "26년 05월"
+            commits: monthlyCounts[key]
+          }));
+          
+          const weeklyTimeline = Object.keys(weeklyCounts).sort().map(key => ({
+            date: `${key.split('-')[1]}/${key.split('-')[2]} 주`, // 예: "05/19 주"
+            commits: weeklyCounts[key]
+          }));
+
+          const dailyTimeline = Object.keys(dailyCounts).sort().map(key => ({
+            date: `${key.split('-')[1]}/${key.split('-')[2]}`, // 예: "05/19"
+            commits: dailyCounts[key]
+          }));
+          
+          setTimelineData({ monthly: monthlyTimeline, weekly: weeklyTimeline, daily: dailyTimeline });
+        } else {
+          // API에 타임라인 데이터가 없을 경우 차트 렌더링 확인을 위한 임시(Mock) 데이터 주입
+          setTimelineData({
+            monthly: [
+              { date: '1월', commits: 15 }, { date: '2월', commits: 28 }, { date: '3월', commits: 18 },
+              { date: '4월', commits: 35 }, { date: '5월', commits: 22 }, { date: '6월', commits: 41 }
+            ],
+            weekly: [
+              { date: '1주차', commits: 5 }, { date: '2주차', commits: 12 }, { date: '3주차', commits: 8 }, { date: '4주차', commits: 16 }
+            ],
+            daily: [
+              { date: '월', commits: 3 }, { date: '화', commits: 7 }, { date: '수', commits: 2 }, { date: '목', commits: 5 }, { date: '금', commits: 8 }, { date: '토', commits: 0 }, { date: '일', commits: 1 }
+            ]
+          });
+        }
+      
+        setDashboardData(mappedData);
+      } catch (err) {
+        console.error('API Fetch Error:', err);
+        setError('대시보드 데이터를 불러오는 중 오류가 발생했습니다.');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchContributions();
+  }, [projectId]);
+
+  if (isLoading) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', fontSize: '1.2rem', color: '#475569', backgroundColor: '#f8fafc' }}>데이터를 분석하여 대시보드를 구성 중입니다...</div>;
+  if (error) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', fontSize: '1.2rem', color: '#ef4444', backgroundColor: '#f8fafc' }}>{error}</div>;
 
   return (
     <div className="dashboard" style={{ backgroundColor: '#f8fafc', minHeight: '100vh', fontFamily: '"Inter", sans-serif' }}>
@@ -41,7 +167,7 @@ const DashboardPage = () => {
         <section className="insight-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '25px', marginTop: '30px' }}>
           <div className="chart-container" style={{ background: '#fff', padding: '24px', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
             <h3 style={{ margin: '0 0 20px 0', fontSize: '1rem', color: '#1e293b' }}>활동 타임라인</h3>
-            <ActivityTimeline />
+            <ActivityTimeline timelineData={timelineData} />
           </div>
 
           <div className="chart-container" style={{ background: '#fff', padding: '24px', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
