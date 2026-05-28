@@ -339,6 +339,12 @@ COMMENT_OR_DOCSTRING_ONLY_MAX_LOC_CHANGE = 80
 COMMENT_OR_DOCSTRING_ONLY_MAX_DIFF_CHARS = 5000
 COMMENT_OR_DOCSTRING_ONLY_MAX_FILES = 5
 
+# 삭제 라인만 포함된 커밋을 구분하기 위한 보수적 기준
+DELETION_ONLY_MAX_CHANGED_LINES = 500
+DELETION_ONLY_MAX_LOC_CHANGE = 500
+DELETION_ONLY_MAX_DIFF_CHARS = 20000
+DELETION_ONLY_MAX_FILES = 10
+
 # ==========================================
 # LLM 분석 공통 Helper 함수
 # ==========================================
@@ -396,6 +402,22 @@ def get_diff_changed_lines(diff_text):
             changed_lines.append(line[1:].strip())
 
     return changed_lines
+
+def get_diff_change_line_counts(diff_text):
+    """Diff에서 실제 추가/삭제 라인 수를 각각 계산"""
+    added_count = 0
+    deleted_count = 0
+
+    for line in (diff_text or "").splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+
+        if line.startswith("+"):
+            added_count += 1
+        elif line.startswith("-"):
+            deleted_count += 1
+
+    return added_count, deleted_count
 
 def get_diff_changed_lines_by_file(diff_text):
     """Diff에서 파일별 실제 추가/삭제 라인을 추출"""
@@ -731,12 +753,54 @@ def is_comment_or_docstring_only_commit(commit, changed_files, diff_chars):
     # OpenAPI/Swagger 문서 annotation만 변경된 경우도 문서화 변경으로 본다
     if is_documentation_annotation_only_change(changed_lines):
         return True
-
+    
     # 메시지가 주석/문서화 중심이어도 실제 코드 구조 변경이 보이면 제외
     if message_has_comment_phrase and not has_structural_code_change(changed_lines):
         return True
 
     return False
+
+def is_deletion_only_commit(commit, changed_files, diff_chars):
+    """추가 라인 없이 삭제 라인만 포함된 커밋인지 보수적으로 판별"""
+    diff_text = commit.diff_text or ""
+
+    if not diff_text.strip():
+        return False
+
+    if not changed_files:
+        return False
+
+    if len(changed_files) > DELETION_ONLY_MAX_FILES:
+        return False
+
+    loc_added = commit.loc_added or 0
+    loc_deleted = commit.loc_deleted or 0
+    loc_changed = loc_added + loc_deleted
+
+    if loc_added > 0:
+        return False
+
+    if loc_deleted <= 0:
+        return False
+
+    if loc_changed > DELETION_ONLY_MAX_LOC_CHANGE:
+        return False
+
+    if diff_chars > DELETION_ONLY_MAX_DIFF_CHARS:
+        return False
+
+    added_count, deleted_count = get_diff_change_line_counts(diff_text)
+
+    if added_count > 0:
+        return False
+
+    if deleted_count <= 0:
+        return False
+
+    if deleted_count > DELETION_ONLY_MAX_CHANGED_LINES:
+        return False
+
+    return True
 
 def classify_commit_for_analysis(commit):
     """커밋 Diff와 메타데이터를 기준으로 LLM 분석용 커밋 유형을 분류"""
@@ -763,7 +827,9 @@ def classify_commit_for_analysis(commit):
     elif is_test_only_commit(commit, changed_files, diff_chars):
         estimated_type = "test_only"
     elif is_comment_or_docstring_only_commit(commit, changed_files, diff_chars):
-        estimated_type = "comment_or_docstring_only"    
+        estimated_type = "comment_or_docstring_only"
+    elif is_deletion_only_commit(commit, changed_files, diff_chars):
+        estimated_type = "deletion_only"        
     elif file_count > 0 and doc_or_config_file_count == file_count:
         estimated_type = "doc_or_config_only"
     elif file_count > 0 and (doc_or_config_file_count / file_count) >= 0.7:
@@ -980,6 +1046,15 @@ Do not invent missing information.
 - analysis_status: "skipped".
 - score_reason: explain that comment/docstring-only changes are excluded from backend code-quality scoring.
 
+4-5. deletion_only
+- Treat commits that contain only deleted source lines and no added implementation lines as outside direct code-quality scoring.
+- commit_summary: create a concise summary that the commit removes existing code without added replacement implementation in the visible diff.
+- commit_backend_score: null.
+- analysis_status: "skipped".
+- score_reason: explain that deletion-only changes cannot be safely scored as standalone implementation quality.
+- Do not treat deletion-only commits as bad code by default.
+- If the deletion is part of a larger visible implementation change with added replacement logic, do not use deletion_only.
+
 5. code_like
 - Analyze the provided diff.
 - Assign commit_backend_score from 0 to 100.
@@ -1152,6 +1227,9 @@ def build_policy_based_summary(commit, classification):
 
     if estimated_type == "comment_or_docstring_only":
         return "주석 또는 docstring 중심 변경으로 코드 문서화를 보강함."
+    
+    if estimated_type == "deletion_only":
+        return "추가 구현 없이 기존 코드 삭제만 포함된 변경을 적용함."
 
     if estimated_type == "doc_or_config_only":
         return "문서 또는 설정 파일 중심으로 프로젝트 설명과 환경 구성을 정리함."
@@ -1210,6 +1288,9 @@ def build_policy_based_analysis_result(commit, classification=None):
     elif estimated_type == "comment_or_docstring_only":
         analysis_status = "skipped"
         score_reason = "주석/docstring 중심 변경으로 코드 품질 점수 산정에서 제외함."    
+    elif estimated_type == "deletion_only":
+        analysis_status = "skipped"
+        score_reason = "삭제 라인만 포함된 변경으로 단독 코드 품질 점수 산정에서 제외함."    
     elif estimated_type in ("doc_or_config_only", "doc_or_config_heavy"):
         analysis_status = "skipped"
         score_reason = "문서/설정 중심 변경으로 코드 품질 점수 산정에서 제외함."
@@ -1331,6 +1412,7 @@ def validate_commit_analysis_result(result, expected_type=None):
         "package_metadata_only",
         "test_only",
         "comment_or_docstring_only",
+        "deletion_only",
         "doc_or_config_only",
         "doc_or_config_heavy"
     ) and analysis_status != "skipped":
@@ -2230,6 +2312,7 @@ def get_analysis_estimate(project_id):
     env_or_url_only_commits = 0
     package_metadata_only_commits = 0
     test_only_commits = 0
+    deletion_only_commits = 0
     comment_or_docstring_only_commits = 0
     code_like_commits = 0
     large_code_diff_commits = 0
@@ -2270,6 +2353,8 @@ def get_analysis_estimate(project_id):
                 test_only_commits += 1
             elif commit_type == "comment_or_docstring_only":
                 comment_or_docstring_only_commits += 1
+            elif commit_type == "deletion_only":
+                deletion_only_commits += 1
             elif commit_type == "doc_or_config_only":
                 doc_or_config_only_commits += 1
             elif commit_type == "doc_or_config_heavy":
@@ -2293,7 +2378,8 @@ def get_analysis_estimate(project_id):
                 "env_or_url_only",
                 "package_metadata_only",
                 "test_only",
-                "comment_or_docstring_only"
+                "comment_or_docstring_only",
+                "deletion_only"
             ):
                 total_input_tokens_code_like += input_tokens
                 total_output_tokens_code_like += output_tokens
@@ -2340,6 +2426,7 @@ def get_analysis_estimate(project_id):
             "package_metadata_only_commits": package_metadata_only_commits,
             "test_only_commits": test_only_commits,
             "comment_or_docstring_only_commits": comment_or_docstring_only_commits,
+            "deletion_only_commits": deletion_only_commits,
             "doc_or_config_only_commits": doc_or_config_only_commits,
             "doc_or_config_heavy_commits": doc_or_config_heavy_commits
         },
@@ -2370,7 +2457,7 @@ def get_analysis_estimate(project_id):
         "notes": [
             "이 API는 실제 LLM을 호출하지 않습니다.",
             "비용은 diff_text 길이와 고정 출력 토큰 수를 기반으로 한 보수적 추정치입니다.",
-            "문서/설정, 포맷팅, 환경값/URL, 패키지 메타데이터, 테스트 전용, 주석/docstring 중심 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
+            "문서/설정, 포맷팅, 테스트, 주석/문서화, 삭제 전용, 환경값/URL, 패키지 메타데이터 중심 커밋은 commit_summary는 생성할 수 있지만 commit_backend_score는 null 처리될 가능성이 높습니다.",
             "diff_truncated가 true인 커밋은 실제 분석 시 제공되지 않은 Diff 뒷부분을 추측하지 않도록 제한해야 합니다.",
             "large_code_diff 커밋은 앞부분만 보고 점수를 단정하지 않고, 추후 chunk 분석 또는 별도 분석 대상으로 분리하는 것이 안전합니다.",
             "실제 비용은 모델, 프롬프트 길이, 출력 길이, 캐시 여부에 따라 달라질 수 있습니다."
