@@ -1474,6 +1474,69 @@ def call_llm_for_commit_analysis(commit_input):
 
     raise RuntimeError(f"지원하지 않는 LLM_PROVIDER 값입니다: {LLM_PROVIDER}")
 
+def extract_raw_result_from_error(error_message):
+    """LLM 검증 실패 메시지에 포함된 raw_result JSON을 가능한 범위에서 추출"""
+    marker = "raw_result="
+    if marker not in error_message:
+        return None
+
+    raw_text = error_message.split(marker, 1)[1].strip()
+
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+
+
+def classify_llm_failure(error):
+    """LLM 분석 실패 원인을 API/파싱/검증/상태충돌 등으로 분류"""
+    error_message = str(error)
+    raw_result = extract_raw_result_from_error(error_message)
+
+    if "API 호출에 실패했습니다" in error_message:
+        return {
+            "action": "llm_api_failed",
+            "error_type": "api_failed",
+            "model_analysis_status": None
+        }
+
+    if "응답에서 텍스트를 추출할 수 없습니다" in error_message:
+        return {
+            "action": "llm_response_extract_failed",
+            "error_type": "response_extract_failed",
+            "model_analysis_status": None
+        }
+
+    if "LLM 응답을 JSON으로 파싱할 수 없습니다" in error_message:
+        return {
+            "action": "llm_parse_failed",
+            "error_type": "parse_failed",
+            "model_analysis_status": None
+        }
+
+    model_analysis_status = None
+    if isinstance(raw_result, dict):
+        model_analysis_status = raw_result.get("analysis_status")
+
+    status_conflict_patterns = (
+        "code_like 커밋은 LLM 분석 결과가 success여야 합니다.",
+        "커밋은 skipped 상태여야 합니다.",
+        "large_code_diff 커밋은 large_diff_pending 상태여야 합니다."
+    )
+
+    if any(pattern in error_message for pattern in status_conflict_patterns):
+        return {
+            "action": "llm_status_conflict",
+            "error_type": "status_conflict",
+            "model_analysis_status": model_analysis_status
+        }
+
+    return {
+        "action": "llm_validation_failed",
+        "error_type": "validation_failed",
+        "model_analysis_status": model_analysis_status
+    }
+
 # ==========================================
 # 2. 데이터베이스 모델 (Schema) 설계
 # ==========================================
@@ -2303,19 +2366,36 @@ def analyze_static_code(project_id):
                 })
 
             except Exception as e:
+                failure_info = classify_llm_failure(e)
+
                 commit.commit_summary = "LLM 커밋 분석 중 오류가 발생함."
                 commit.commit_backend_score = None
                 commit.analysis_status = "failed"
-                commit.score_reason = "LLM API 호출 또는 응답 저장 중 오류가 발생함."
+
+                if failure_info["error_type"] == "status_conflict":
+                    commit.score_reason = "LLM 응답 상태와 내부 커밋 분류가 충돌하여 재검토가 필요함."
+                elif failure_info["error_type"] == "api_failed":
+                    commit.score_reason = "LLM API 호출 실패로 커밋 분석을 완료하지 못함."
+                elif failure_info["error_type"] == "parse_failed":
+                    commit.score_reason = "LLM 응답 JSON 파싱 실패로 분석 결과를 저장하지 못함."
+                else:
+                    commit.score_reason = "LLM 응답 검증 또는 저장 중 오류가 발생함."
 
                 failed_count += 1
-                analyzed_commits.append({
+
+                failed_commit_result = {
                     "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
                     "estimated_type": estimated_type,
                     "analysis_status": "failed",
-                    "action": "llm_failed",
+                    "action": failure_info["action"],
+                    "error_type": failure_info["error_type"],
                     "error": str(e)[:1200]
-                })
+                }
+
+                if failure_info.get("model_analysis_status") is not None:
+                    failed_commit_result["model_analysis_status"] = failure_info["model_analysis_status"]
+
+                analyzed_commits.append(failed_commit_result)
 
             continue
 
