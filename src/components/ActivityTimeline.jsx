@@ -51,8 +51,8 @@ const ActivityTimeline = ({ timelineData }) => {
             </LineChart>
           </ResponsiveContainer>
         ) : (
-          <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', fontSize: '0.9rem' }}>
-            타임라인 데이터가 없습니다. (백엔드 연동 필요)
+          <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '0.95rem', fontWeight: '500', backgroundColor: '#f8fafc', borderRadius: '8px' }}>
+            해당 기간의 활동 데이터가 없습니다.
           </div>
         )}
       </div>

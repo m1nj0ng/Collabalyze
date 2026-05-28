@@ -42,6 +42,7 @@ const LoadingPage = () => {
               setStatusMessage('GitHub 데이터 수집 중...');
               pollTimer = setTimeout(pollStatus, 3000); // 3초 뒤 다시 호출
             } else if (state === 'SUCCESS') {
+              // 4. 완료 시 Dashboard로 project_id와 함께 리다이렉트
               // 4. 완료 시 로컬 스토리지에 분석 기록 저장 및 Dashboard로 리다이렉트
               const savedHistory = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
               const newHistoryItem = {

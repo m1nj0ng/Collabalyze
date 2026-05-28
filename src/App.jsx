@@ -3,6 +3,7 @@ import MainPage from './pages/MainPage';
 import LoadingPage from './pages/LoadingPage';
 import DashboardPage from './pages/DashboardPage';
 import DetailPage from './pages/DetailPage';
+import ComparePage from './pages/ComparePage';
 import './App.css'
 
 function App() {
@@ -13,6 +14,7 @@ function App() {
         <Route path="/loading" element={<LoadingPage />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/detail/:memberId" element={<DetailPage />} />
+        <Route path="/compare" element={<ComparePage />} />
       </Routes>
     </Router>
   );

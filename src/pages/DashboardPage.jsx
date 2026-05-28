@@ -17,6 +17,7 @@ const DashboardPage = () => {
   const [timelineData, setTimelineData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [selectedForCompare, setSelectedForCompare] = useState([]);
 
   // 역할 판별 로직 (Persona Logic)
   const getMemberPersona = (member) => {
@@ -42,7 +43,8 @@ const DashboardPage = () => {
         const response = await axios.get(`http://3.39.190.222:5000/api/projects/${projectId}/contributions`);
         
         // 응답 데이터가 배열 형태(data)로 온다고 가정
-        const apiData = response.data?.data || response.data || [];
+        let apiData = response.data?.data || response.data;
+        if (!Array.isArray(apiData)) apiData = []; // 배열이 아닌 객체(에러 등)가 왔을 때 map 에러가 발생하여 화면이 멈추는 현상 방지
         
         const mappedData = apiData.map((item, index) => {
           const quant = item['1_quantitative_data'] || {};
@@ -55,15 +57,15 @@ const DashboardPage = () => {
             profileImage: item.profile_image || null,
             
             // 1. 정량적 데이터 매핑
-            commits: quant.commits || 0,
-            pullRequests: quant.pull_requests || 0,
-            reviews: quant.code_reviews || 0,
-            issues: quant.issues || 0,
-            locAdded: quant.loc_added || 0,
-            locDeleted: quant.loc_deleted || 0,
+            commits: Number(quant.commits) || 0,
+            pullRequests: Number(quant.pull_requests) || 0,
+            reviews: Number(quant.code_reviews) || 0,
+            issues: Number(quant.issues) || 0,
+            locAdded: Number(quant.loc_added) || 0,
+            locDeleted: Number(quant.loc_deleted) || 0,
             
             // 2. 점수 데이터 (분석 전 null 대비)
-            score: item.final_score || 0,
+            score: Number(item.final_score) || 0,
             backendCodeScore: staticCode.backend_code_score || null,
             
             // 3. NLP 및 요약 데이터 (null 필터링 적용)
@@ -72,6 +74,7 @@ const DashboardPage = () => {
             changedFiles: (nlp.commits || []).flatMap(c => c.changed_files || []),
             prSummaries: (nlp.pull_requests || []).map(pr => pr.pr_summary).filter(Boolean),
             issueSummaries: (nlp.issues || []).map(i => i.issue_summary).filter(Boolean),
+            rawCommits: nlp.commits || [],
           };
         });
 
@@ -83,11 +86,15 @@ const DashboardPage = () => {
           const dailyCounts = {};
           
           allCommits.forEach(c => {
-            if (!c.date) return;
+            // 백엔드 데이터 키값이 date가 아닐 수 있는 상황 대비 (created_at, timestamp 등)
+            const targetDate = c.date || c.created_at || c.timestamp;
+            if (!targetDate) return;
             
-            // 브라우저 호환성을 위해 날짜 문자열 공백을 'T'로 변환 (예: "2026-05-19 12:00:00" -> "2026-05-19T12:00:00")
-            const validDateStr = c.date.replace(' ', 'T');
-            const d = new Date(validDateStr);
+            // 날짜 파싱 안정성 강화
+            let d = new Date(targetDate);
+            if (isNaN(d.getTime()) && typeof targetDate === 'string') {
+              d = new Date(targetDate.replace(' ', 'T'));
+            }
             if (isNaN(d.getTime())) return; // 유효하지 않은 날짜 필터링
 
             // 1. 월별 (YYYY-MM)
@@ -124,19 +131,8 @@ const DashboardPage = () => {
           
           setTimelineData({ monthly: monthlyTimeline, weekly: weeklyTimeline, daily: dailyTimeline });
         } else {
-          // API에 타임라인 데이터가 없을 경우 차트 렌더링 확인을 위한 임시(Mock) 데이터 주입
-          setTimelineData({
-            monthly: [
-              { date: '1월', commits: 15 }, { date: '2월', commits: 28 }, { date: '3월', commits: 18 },
-              { date: '4월', commits: 35 }, { date: '5월', commits: 22 }, { date: '6월', commits: 41 }
-            ],
-            weekly: [
-              { date: '1주차', commits: 5 }, { date: '2주차', commits: 12 }, { date: '3주차', commits: 8 }, { date: '4주차', commits: 16 }
-            ],
-            daily: [
-              { date: '월', commits: 3 }, { date: '화', commits: 7 }, { date: '수', commits: 2 }, { date: '목', commits: 5 }, { date: '금', commits: 8 }, { date: '토', commits: 0 }, { date: '일', commits: 1 }
-            ]
-          });
+          // 실제 타임라인 데이터가 없을 경우 빈 상태 표시
+          setTimelineData({ monthly: [], weekly: [], daily: [] });
         }
       
         setDashboardData(mappedData);
@@ -150,6 +146,26 @@ const DashboardPage = () => {
 
     fetchContributions();
   }, [projectId]);
+
+  const handleCompareSelect = (member) => {
+    setSelectedForCompare(prev => {
+      const isSelected = prev.some(m => m.id === member.id);
+      if (isSelected) return prev.filter(m => m.id !== member.id);
+      if (prev.length >= 2) {
+        alert('비교 모드는 최대 2명까지만 선택할 수 있습니다.');
+        return prev;
+      }
+      return [...prev, member];
+    });
+  };
+
+  const goToCompare = () => {
+    if (selectedForCompare.length !== 2) {
+      alert('비교할 팀원 2명을 선택해주세요.');
+      return;
+    }
+    navigate('/compare', { state: { members: selectedForCompare } });
+  };
 
   if (isLoading) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', fontSize: '1.2rem', color: '#475569', backgroundColor: '#f8fafc' }}>데이터를 분석하여 대시보드를 구성 중입니다...</div>;
   if (error) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', fontSize: '1.2rem', color: '#ef4444', backgroundColor: '#f8fafc' }}>{error}</div>;
@@ -190,14 +206,34 @@ const DashboardPage = () => {
               {/* 인원 증가 시 D3.js나 React-force-graph 라이브러리가 이 영역을 캔버스로 활용하게 됩니다. */}
               <CollaborationGraph data={dashboardData} />
               <div style={{ position: 'absolute', bottom: '10px', right: '10px', fontSize: '0.75rem', color: '#94a3b8' }}>
-                💡 노드를 드래그하여 위치를 조정하거나 휠로 확대/축소할 수 있습니다.
+                💡 빈 공간을 드래그하여 화면을 이동하거나, 휠로 확대/축소할 수 있습니다.
               </div>
             </div>
           </div>
         </section>
 
         <section className="member-list" style={{ marginTop: '40px' }}>
-          <h2 style={{ fontSize: '1.25rem', color: '#1e293b', marginBottom: '20px', fontWeight: '700' }}>팀원별 상세 지표</h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+            <h2 style={{ fontSize: '1.25rem', color: '#1e293b', margin: 0, fontWeight: '700' }}>팀원별 상세 지표</h2>
+            {selectedForCompare.length > 0 && (
+              <button
+                onClick={goToCompare}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: selectedForCompare.length === 2 ? '#10b981' : '#94a3b8',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: selectedForCompare.length === 2 ? 'pointer' : 'not-allowed',
+                  fontSize: '0.9rem',
+                  fontWeight: '600',
+                  transition: 'background 0.2s'
+                }}
+              >
+                {selectedForCompare.length}명 선택됨 (비교하기)
+              </button>
+            )}
+          </div>
           <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
               <thead>
@@ -206,6 +242,7 @@ const DashboardPage = () => {
                   <th style={{ padding: '16px 24px', fontWeight: '600', color: '#64748b' }}>Commits</th>
                   <th style={{ padding: '16px 24px', fontWeight: '600', color: '#64748b' }}>Reviews</th>
                   <th style={{ padding: '16px 24px', fontWeight: '600', color: '#64748b' }}>활동 인사이트</th>
+                  <th style={{ padding: '16px 24px', fontWeight: '600', color: '#64748b' }}>비교</th>
                   <th style={{ padding: '16px 24px', fontWeight: '600', color: '#64748b' }}>상세보기</th>
                 </tr>
               </thead>
@@ -226,7 +263,15 @@ const DashboardPage = () => {
                       })()}
                     </td>
                     <td style={{ padding: '16px 24px' }}>
-                      <button onClick={() => navigate(`/detail/${member.id}`)} style={{ padding: '8px 14px', backgroundColor: '#4f46e5', color: '#ffffff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem', fontWeight: '600', transition: 'background 0.2s' }}>인사이트 보기</button>
+                      <input 
+                        type="checkbox" 
+                        checked={selectedForCompare.some(m => m.id === member.id)}
+                        onChange={() => handleCompareSelect(member)}
+                        style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: '#4f46e5' }}
+                      />
+                    </td>
+                    <td style={{ padding: '16px 24px' }}>
+                      <button onClick={() => navigate(`/detail/${member.id}`, { state: { member } })} style={{ padding: '8px 14px', backgroundColor: '#4f46e5', color: '#ffffff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem', fontWeight: '600', transition: 'background 0.2s' }}>인사이트 보기</button>
                     </td>
                   </tr>
                 ))}

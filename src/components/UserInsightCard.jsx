@@ -21,10 +21,36 @@ const UserInsightCard = ({ member }) => (
           {member.role || '팀원'}
         </span>
       </h2>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '15px' }}>
-        <span style={{ fontSize: '1.1rem', color: '#334155', fontWeight: '500' }}>{member.skills}</span>
-        <span style={{ fontSize: '1.1rem', color: '#334155', fontWeight: '500' }}>{member.engagement}</span>
+      
+      <div style={{ display: 'flex', gap: '15px', marginTop: '15px', flexWrap: 'wrap' }}>
+        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>기여 점수</div>
+          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#4f46e5' }}>{member.score || 0}점</div>
+        </div>
+        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>Commits</div>
+          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1e293b' }}>{member.commitsCount || 0}</div>
+        </div>
+        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>PRs</div>
+          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1e293b' }}>{member.prCount || 0}</div>
+        </div>
+        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>Reviews</div>
+          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1e293b' }}>{member.reviewsCount || 0}</div>
+        </div>
+        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>Issues</div>
+          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1e293b' }}>{member.issuesCount || 0}</div>
+        </div>
       </div>
+      
+      {member.skills && member.engagement && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '15px' }}>
+          <span style={{ fontSize: '0.95rem', color: '#334155', fontWeight: '500' }}>{member.skills}</span>
+          <span style={{ fontSize: '0.95rem', color: '#334155', fontWeight: '500' }}>{member.engagement}</span>
+        </div>
+      )}
     </div>
   </div>
 );

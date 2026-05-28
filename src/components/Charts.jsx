@@ -9,8 +9,18 @@ export const ActivityPieChart = ({ data }) => {
     '#14b8a6', '#f97316', '#0ea5e9', '#d946ef', '#2dd4bf'
   ];
   
-  // 기여도 분포를 커밋 횟수가 아닌 종합 기여 점수(score) 기반으로 변경
-  const chartData = data.map(m => ({ name: m.name, value: m.score }));
+  // 기여도 분포를 AI 종합 기여 점수(score) 기반으로 하되, 분석 전이라 점수가 0이라면 커밋 횟수를 대체값으로 사용
+  const chartData = data.map(m => {
+    let val = Number(m.score);
+    if (isNaN(val) || val <= 0) val = Number(m.commits);
+    if (isNaN(val) || val <= 0) val = 1; // 데이터가 모두 0일 때 파이차트가 터지는(검은 화면) Recharts 버그 완벽 방어
+    return { name: String(m.name), value: val };
+  });
+
+  // 데이터가 아예 없을 경우 빈 차트 에러 방지
+  if (!chartData || chartData.length === 0) {
+    return <div style={{ height: 250, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8' }}>데이터가 없습니다.</div>;
+  }
 
   return (
     <div style={{ width: '100%', height: 250 }}>

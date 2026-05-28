@@ -111,6 +111,7 @@ const MainPage = () => {
     }
     if (!repoUrl) return alert('리포지토리를 선택하거나 URL을 입력해주세요.');
 
+    // 분석 기록 저장은 LoadingPage에서 완료 시점에 처리되므로 여기서는 제거합니다.
     goToAnalysis(repoUrl);
   };
 
@@ -182,10 +183,8 @@ const MainPage = () => {
                   key={item.id || idx} 
                   onClick={() => {
                     if (item.projectId) {
-                      // projectId가 있으면 로딩 없이 과거 분석 결과 대시보드로 바로 이동
                       navigate('/dashboard', { state: { projectId: item.projectId, repoUrl: item.url } });
                     } else {
-                      // 과거에 저장되어 projectId가 없는 기록은 재분석 진행
                       navigate('/loading', { state: { repoUrl: item.url } });
                     }
                   }}
