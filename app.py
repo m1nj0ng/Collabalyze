@@ -2644,6 +2644,30 @@ def get_project_contributions(project_id):
                 "changed_files": extract_changed_files(commit.diff_text)
             })
         
+        # [데이터 1-0] 커밋 정적 분석 커버리지 집계
+        total_commit_count = len(commits)
+        pending_analysis_count = sum(
+            1 for commit in commits
+            if commit.analysis_status is None
+        )
+        scored_commit_count = sum(
+            1 for commit in commits
+            if commit.commit_backend_score is not None
+        )
+        skipped_commit_count = sum(
+            1 for commit in commits
+            if commit.analysis_status == "skipped"
+        )
+        large_diff_pending_count = sum(
+            1 for commit in commits
+            if commit.analysis_status == "large_diff_pending"
+        )
+        failed_analysis_count = sum(
+            1 for commit in commits
+            if commit.analysis_status == "failed"
+        )
+        analyzed_commit_count = total_commit_count - pending_analysis_count
+
         total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
         
         # [데이터 1-1] 커밋별 백엔드 코드 점수 평균 계산
@@ -2714,7 +2738,14 @@ def get_project_contributions(project_id):
 
             "3_static_code_analysis_data": {
                 "total_complexity_score": total_complexity,
-                "backend_code_score": backend_code_score
+                "backend_code_score": backend_code_score,
+                "total_commit_count": total_commit_count,
+                "analyzed_commit_count": analyzed_commit_count,
+                "scored_commit_count": scored_commit_count,
+                "skipped_commit_count": skipped_commit_count,
+                "large_diff_pending_count": large_diff_pending_count,
+                "failed_analysis_count": failed_analysis_count,
+                "pending_analysis_count": pending_analysis_count
             }
         }
         result.append(user_data)
