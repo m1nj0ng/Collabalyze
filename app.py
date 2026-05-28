@@ -948,7 +948,7 @@ Field rules:
 
 2. commit_backend_score
 - Use a number from 0 to 100 only when the commit is a normal code-like commit and the provided diff is sufficient for code-quality evaluation.
-- Use null when the commit is not applicable for backend code-quality scoring.
+- Use null when the commit is not applicable for static source-code quality scoring.
 - null does not mean bad quality. It means the commit is outside the scoring scope or cannot be evaluated safely.
 - Do not give a default score such as 70 when evidence is insufficient.
 - Do not score documentation-only, config-only, formatting-only, empty-diff, or large-code-diff-pending commits.
@@ -958,7 +958,7 @@ Field rules:
 3. analysis_status
 Use only one of these four values:
 - "success": a normal code-like commit was analyzed and commit_backend_score was assigned.
-- "skipped": the commit is outside the backend code-quality scoring scope.
+- "skipped": the commit is outside the static source-code quality scoring scope.
 - "large_diff_pending": the commit is a large code diff that should not be scored by a single truncated analysis.
 - "failed": analysis cannot be completed due to invalid input or unrecoverable processing failure.
 
@@ -984,7 +984,7 @@ Do not use "truncated" as analysis_status.
 
 Commit type policy:
 
-The input includes estimated_type. Use it as the backend pre-classification.
+The input includes estimated_type. Use it as the backend pipeline's pre-classification.
 However, still read the visible diff and metadata to avoid obvious contradictions.
 Do not invent missing information.
 
@@ -998,53 +998,53 @@ Do not invent missing information.
 - commit_summary: create a conservative message/file-based summary.
 - commit_backend_score: null.
 - analysis_status: "skipped".
-- score_reason: explain that it is documentation/config centered and outside backend code-quality scoring.
+- score_reason: explain that it is documentation/config centered and outside static source-code quality scoring.
 
 3. format_only
 - commit_summary: create a concise formatting/style summary.
 - commit_backend_score: null.
 - analysis_status: "skipped".
-- score_reason: explain that formatting-only work is excluded from backend code-quality scoring.
+- score_reason: explain that formatting-only work is excluded from static source-code quality scoring.
 - Formatting-only commits must be skipped even if they modify code files, have large LOC changes, have high complexity_score, or have diff_truncated=true.
-- Do not treat formatting-only work as low-quality code. It is a valid contribution, but it is outside this backend code-quality scoring scope.
+- Do not treat formatting-only work as low-quality code. It is a valid contribution, but it is outside this static source-code quality scoring scope.
 
 4. doc_or_config_heavy
-- Usually treat as skipped unless the provided diff clearly contains meaningful backend code logic changes.
+- Usually treat as skipped unless the provided diff clearly contains meaningful source-code logic changes.
 - A doc_or_config_heavy commit should not become "success" merely because it touches one code file.
-- Only assign "success" if the visible code diff contains meaningful backend logic changes, not just comments, docstrings, generated docs, dependency setup, documentation configuration, or documentation annotations.
+- Only assign "success" if the visible code diff contains meaningful source-code logic changes, not just comments, docstrings, generated docs, dependency setup, documentation configuration, or documentation annotations.
 - If skipped, commit_backend_score must be null and analysis_status must be "skipped".
-- If the visible backend code change is clearly meaningful and sufficiently reviewable, analysis_status may be "success" and commit_backend_score may be assigned.
+- If the visible source-code change is clearly meaningful and sufficiently reviewable, analysis_status may be "success" and commit_backend_score may be assigned.
 
 4-1. env_or_url_only
-- Treat simple environment value, redirect URL, callback URL, localhost, Vercel URL, or temporary frontend test URL changes as outside backend code-quality scoring.
+- Treat simple environment value, redirect URL, callback URL, localhost, Vercel URL, or temporary frontend test URL changes as outside static source-code quality scoring.
 - commit_summary: create a concise summary of the URL/environment value adjustment.
 - commit_backend_score: null.
 - analysis_status: "skipped".
-- score_reason: explain that URL/environment value changes are excluded from backend code-quality scoring.
+- score_reason: explain that URL/environment value changes are excluded from static source-code quality scoring.
 - Do not assign a numeric score only because the change appears in a backend file such as app.py.
 
 4-2. package_metadata_only
-- Treat package version bumps, release metadata, setup.py/setup.cfg/pyproject.toml metadata-only changes as outside backend code-quality scoring.
+- Treat package version bumps, release metadata, setup.py/setup.cfg/pyproject.toml metadata-only changes as outside static source-code quality scoring.
 - commit_summary: create a concise summary of the package version or metadata update.
 - commit_backend_score: null.
 - analysis_status: "skipped".
-- score_reason: explain that package metadata changes are excluded from backend code-quality scoring.
+- score_reason: explain that package metadata changes are excluded from static source-code quality scoring.
 - Do not assign a numeric score only because the change appears in a Python file such as setup.py.
 
 4-3. test_only
-- Treat commits that only change test files as outside runtime backend code-quality scoring in v1.
+- Treat commits that only change test files as outside direct source-code quality scoring in v1.
 - commit_summary: summarize the test addition or update.
 - commit_backend_score: null.
 - analysis_status: "skipped".
-- score_reason: explain that test-only changes are excluded from runtime backend code-quality scoring.
+- score_reason: explain that test-only changes are excluded from direct source-code quality scoring.
 - Do not treat test-only work as low-quality code; it is valid contribution but outside this score.
 
 4-4. comment_or_docstring_only
-- Treat commits that only add or update comments/docstrings as outside backend code-quality scoring.
+- Treat commits that only add or update comments/docstrings as outside direct source-code quality scoring.
 - commit_summary: summarize the documentation/comment improvement.
 - commit_backend_score: null.
 - analysis_status: "skipped".
-- score_reason: explain that comment/docstring-only changes are excluded from backend code-quality scoring.
+- score_reason: explain that comment/docstring-only changes are excluded from direct source-code quality scoring.
 
 4-5. deletion_only
 - Treat commits that contain only deleted source lines and no added implementation lines as outside direct code-quality scoring.
@@ -1064,7 +1064,7 @@ Do not invent missing information.
 
 6. large_code_diff
 - large_code_diff is not the same as skipped.
-- It may contain important backend logic changes, but v1 must not assign a numeric score unless the full diff is analyzed.
+- It may contain important source-code logic changes, but v1 must not assign a numeric score unless the full diff is analyzed.
 - Use "large_diff_pending" to mean that the commit should be analyzed later with a chunked or separate large-diff strategy.
 - Do not assign a partial or approximate score based only on the visible or truncated diff.
 - commit_backend_score must be null.
@@ -1102,7 +1102,7 @@ Total: 100 points.
 
 1. Functional correctness and implementation relevance: 25 points
 - Does the change match the commit purpose?
-- Does it implement, fix, or improve actual backend behavior?
+- Does it implement, fix, or improve actual source-code behavior?
 - Is the logic coherent based on the provided diff?
 
 2. Code structure and modularity: 20 points
@@ -1223,7 +1223,7 @@ def build_policy_based_summary(commit, classification):
         return "패키지 버전 또는 배포 메타데이터를 갱신함."
     
     if estimated_type == "test_only":
-        return "테스트 코드만 변경되어 백엔드 코드 품질 점수 산정에서 제외함."
+        return "테스트 코드만 변경되어 정적 코드 품질 점수 산정에서 제외함."
 
     if estimated_type == "comment_or_docstring_only":
         return "주석 또는 docstring 중심 변경으로 코드 문서화를 보강함."
@@ -1272,28 +1272,28 @@ def build_policy_based_analysis_result(commit, classification=None):
 
     if estimated_type == "empty_diff":
         analysis_status = "skipped"
-        score_reason = "Diff가 없어 백엔드 코드 품질 점수 산정에서 제외함."
+        score_reason = "Diff가 없어 정적 코드 품질 점수 산정에서 제외함."
     elif estimated_type == "format_only":
         analysis_status = "skipped"
-        score_reason = "포맷팅 중심 변경으로 코드 품질 점수 산정에서 제외함."
+        score_reason = "포맷팅 중심 변경으로 정적 코드 품질 점수 산정에서 제외함."
     elif estimated_type == "env_or_url_only":
         analysis_status = "skipped"
-        score_reason = "환경값 또는 URL 수준의 변경으로 코드 품질 점수 산정에서 제외함."
+        score_reason = "환경값 또는 URL 수준의 변경으로 정적 코드 품질 점수 산정에서 제외함."
     elif estimated_type == "package_metadata_only":
         analysis_status = "skipped"
-        score_reason = "패키지 메타데이터 변경으로 코드 품질 점수 산정에서 제외함."
+        score_reason = "패키지 메타데이터 변경으로 정적 코드 품질 점수 산정에서 제외함."
     elif estimated_type == "test_only":
         analysis_status = "skipped"
-        score_reason = "테스트 코드 전용 변경으로 런타임 코드 품질 점수 산정에서 제외함."
+        score_reason = "테스트 코드 전용 변경으로 정적 코드 품질 점수 산정에서 제외함."
     elif estimated_type == "comment_or_docstring_only":
         analysis_status = "skipped"
-        score_reason = "주석/docstring 중심 변경으로 코드 품질 점수 산정에서 제외함."    
+        score_reason = "주석/docstring 중심 변경으로 정적 코드 품질 점수 산정에서 제외함."    
     elif estimated_type == "deletion_only":
         analysis_status = "skipped"
-        score_reason = "삭제 라인만 포함된 변경으로 단독 코드 품질 점수 산정에서 제외함."    
+        score_reason = "삭제 라인만 포함된 변경으로 단독 정적 코드 품질 점수 산정에서 제외함."    
     elif estimated_type in ("doc_or_config_only", "doc_or_config_heavy"):
         analysis_status = "skipped"
-        score_reason = "문서/설정 중심 변경으로 코드 품질 점수 산정에서 제외함."
+        score_reason = "문서/설정 중심 변경으로 정적 코드 품질 점수 산정에서 제외함."
     elif estimated_type == "large_code_diff":
         analysis_status = "large_diff_pending"
         score_reason = "대형 코드 diff로 일반 단일 분석 방식에서는 점수 산정을 보류함."
@@ -1462,7 +1462,7 @@ OPENAI_COMMIT_ANALYSIS_RESPONSE_SCHEMA = {
         },
         "commit_backend_score": {
             "type": ["number", "null"],
-            "description": "Backend code quality score from 0 to 100, or null if not applicable"
+            "description": "Static source-code quality score from 0 to 100, or null if not applicable"
         },
         "analysis_status": {
             "type": "string",
