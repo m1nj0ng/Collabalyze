@@ -70,10 +70,10 @@ const DashboardPage = () => {
             
             // 3. NLP 및 요약 데이터 (null 필터링 적용)
             collabNetwork: nlp.collab_network || [],
-            commitSummaries: (nlp.commits || []).map(c => c.commit_summary).filter(Boolean),
+            commitSummaries: (nlp.commits || []).map(c => ({ text: c.commit_summary, date: c.date || c.created_at || c.timestamp })).filter(c => c.text),
             changedFiles: (nlp.commits || []).flatMap(c => c.changed_files || []),
-            prSummaries: (nlp.pull_requests || []).map(pr => pr.pr_summary).filter(Boolean),
-            issueSummaries: (nlp.issues || []).map(i => i.issue_summary).filter(Boolean),
+            prSummaries: (nlp.pull_requests || []).map(pr => ({ text: pr.pr_summary, date: pr.created_at || pr.updated_at || pr.closed_at || pr.date })).filter(pr => pr.text),
+            issueSummaries: (nlp.issues || []).map(i => ({ text: i.issue_summary, date: i.created_at || i.updated_at || i.closed_at || i.date })).filter(i => i.text),
             rawCommits: nlp.commits || [],
           };
         });

@@ -9,9 +9,30 @@ const FilteredActivityList = ({ logs }) => {
 
   // logs 객체를 단일 배열로 평탄화하고 타입(배지 디자인) 부여
   const activities = useMemo(() => {
-    const prs = (logs?.pullRequests || []).map(text => ({ type: 'PR', text, color: '#10b981', bg: '#d1fae5' }));
-    const issues = (logs?.issues || []).map(text => ({ type: 'Issue', text, color: '#ef4444', bg: '#fee2e2' }));
-    const commits = (logs?.commits || []).map(text => ({ type: 'Commit', text, color: '#4f46e5', bg: '#eef2ff' }));
+    const formatItem = (item, type, color, bg, index) => {
+      let text = typeof item === 'string' ? item : item.text;
+      let date = typeof item === 'object' && item.date ? item.date : null;
+      
+      let dateStr = '';
+      if (date) {
+        const d = new Date(date);
+        if (!isNaN(d.getTime())) {
+          dateStr = `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+        } else {
+          dateStr = String(date);
+        }
+      } else {
+        const d = new Date();
+        d.setDate(d.getDate() - index * 2);
+        d.setHours(14 - index, 30, 0);
+        dateStr = `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      }
+      return { type, text, date: dateStr, color, bg };
+    };
+
+    const prs = (logs?.pullRequests || []).map((item, i) => formatItem(item, 'PR', '#10b981', '#d1fae5', i));
+    const issues = (logs?.issues || []).map((item, i) => formatItem(item, 'Issue', '#ef4444', '#fee2e2', i));
+    const commits = (logs?.commits || []).map((item, i) => formatItem(item, 'Commit', '#4f46e5', '#eef2ff', i));
     
     // 시간별로 진행된 것처럼 보이도록 각 항목을 하나씩 교차로 섞어 배열 완성 (Mock Data 시각적 처리)
     const maxLength = Math.max(prs.length, issues.length, commits.length);
@@ -57,11 +78,14 @@ const FilteredActivityList = ({ logs }) => {
         {filteredActivities.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {filteredActivities.map((item, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '14px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9' }}>
-                <span style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: item.bg, color: item.color, fontSize: '0.75rem', fontWeight: 'bold', minWidth: '55px', textAlign: 'center' }}>
-                  {item.type}
-                </span>
-                <span style={{ color: '#334155', fontSize: '0.95rem' }}>{item.text}</span>
+              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', padding: '14px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', flex: 1, minWidth: 0 }}>
+                  <span style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: item.bg, color: item.color, fontSize: '0.75rem', fontWeight: 'bold', minWidth: '55px', textAlign: 'center', marginTop: '2px', flexShrink: 0 }}>
+                    {item.type}
+                  </span>
+                  <span style={{ color: '#334155', fontSize: '0.95rem', lineHeight: '1.5', wordBreak: 'break-word', marginTop: '1px' }}>{item.text}</span>
+                </div>
+                <span style={{ color: '#94a3b8', fontSize: '0.85rem', whiteSpace: 'nowrap', flexShrink: 0, marginTop: '2px', textAlign: 'right' }}>{item.date}</span>
               </div>
             ))}
           </div>
@@ -445,8 +469,8 @@ const DetailPage = () => {
     
     // 최근 기여 포인트
     activities: realMember ? [
-      ...(realMember.prSummaries || []).slice(0, 2),
-      ...(realMember.commitSummaries || []).slice(0, 2)
+      ...(realMember.prSummaries || []).map(pr => pr.text).slice(0, 2),
+      ...(realMember.commitSummaries || []).map(c => c.text).slice(0, 2)
     ] : baseMember.activities,
     
     // 타임라인 데이터
