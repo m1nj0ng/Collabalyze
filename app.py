@@ -288,8 +288,50 @@ COMMENT_OR_DOCSTRING_ONLY_MESSAGE_PHRASES = (
     'documentation',
     'add docs',
     'update docs',
+    'api docs',
+    'api documentation',
+    'openapi',
+    'swagger',
     '주석',
     '설명 주석'
+)
+
+# OpenAPI/Swagger 문서용 annotation만 변경된 커밋을 보수적으로 구분하기 위한 기준
+DOCUMENTATION_ANNOTATION_PREFIXES = (
+    '@operation',
+    '@apiresponse',
+    '@apiresponses',
+    '@parameter',
+    '@parameters',
+    '@schema',
+    '@tag',
+    '@tags',
+    '@content',
+    '@arraySchema'.lower(),
+    '@exampleObject'.lower(),
+    '@examplesObject'.lower(),
+    '@requestBody'.lower()
+)
+
+DOCUMENTATION_ANNOTATION_ARGUMENT_PREFIXES = (
+    'summary',
+    'description',
+    'responsecode',
+    'content',
+    'schema',
+    'tags',
+    'tag',
+    'parameters',
+    'parameter',
+    'requestbody',
+    'required',
+    'example',
+    'examples',
+    'implementation',
+    'mediatype',
+    'name',
+    'value',
+    'hidden'
 )
 
 COMMENT_OR_DOCSTRING_ONLY_MAX_CHANGED_LINES = 80
@@ -393,6 +435,12 @@ def is_comment_or_docstring_like_line(line):
     if stripped.startswith("#"):
         return True
 
+    if stripped.startswith("//"):
+        return True
+
+    if stripped.startswith("/*") or stripped.startswith("*") or stripped.startswith("*/"):
+        return True
+
     if stripped.startswith('"""') or stripped.startswith("'''"):
         return True
 
@@ -400,6 +448,52 @@ def is_comment_or_docstring_like_line(line):
         return True
 
     return False
+
+def is_documentation_annotation_only_change(changed_lines):
+    """OpenAPI/Swagger 문서 annotation 라인만 변경됐는지 보수적으로 판별"""
+    non_empty_lines = [
+        (line or "").strip()
+        for line in changed_lines
+        if (line or "").strip()
+    ]
+
+    if not non_empty_lines:
+        return False
+
+    changed_text = "\n".join(non_empty_lines).lower()
+
+    has_documentation_annotation = any(
+        prefix.lower() in changed_text
+        for prefix in DOCUMENTATION_ANNOTATION_PREFIXES
+    )
+
+    if not has_documentation_annotation:
+        return False
+
+    for line in non_empty_lines:
+        stripped = line.strip()
+        lower_stripped = stripped.lower()
+
+        if is_comment_or_docstring_like_line(stripped):
+            continue
+
+        if lower_stripped.startswith(tuple(prefix.lower() for prefix in DOCUMENTATION_ANNOTATION_PREFIXES)):
+            continue
+
+        compact_line = lower_stripped.strip(" \t,;(){}[]")
+
+        if not compact_line:
+            continue
+
+        if any(
+            compact_line.startswith(argument)
+            for argument in DOCUMENTATION_ANNOTATION_ARGUMENT_PREFIXES
+        ):
+            continue
+
+        return False
+
+    return True
 
 def is_env_or_url_only_commit(commit, changed_files, diff_chars):
     """단순 URL/환경값 변경 중심 커밋인지 보수적으로 판별"""
@@ -451,12 +545,40 @@ def is_test_file(filename):
     normalized = (filename or "").replace("\\", "/").lower()
     basename = os.path.basename(normalized)
 
+    test_path_markers = (
+        "tests/",
+        "test/",
+        "__tests__/",
+        "cypress/",
+        "src/test/",
+        "/tests/",
+        "/test/",
+        "/__tests__/",
+        "/cypress/",
+        "/src/test/"
+    )
+
+    test_suffixes = (
+        "_test.py",
+        "_tests.py",
+        ".test.js",
+        ".test.jsx",
+        ".test.ts",
+        ".test.tsx",
+        ".spec.js",
+        ".spec.jsx",
+        ".spec.ts",
+        ".spec.tsx",
+        "_test.java",
+        "_tests.java",
+        "_test.kt",
+        "_tests.kt"
+    )
+
     return (
-        normalized.startswith("tests/")
-        or "/tests/" in normalized
+        any(marker in normalized for marker in test_path_markers)
         or basename.startswith("test_")
-        or basename.endswith("_test.py")
-        or basename.endswith("test.py")
+        or basename.endswith(test_suffixes)
     )
 
 def is_package_metadata_file(filename):
@@ -606,6 +728,10 @@ def is_comment_or_docstring_only_commit(commit, changed_files, diff_chars):
     if all(is_comment_or_docstring_like_line(line) for line in changed_lines):
         return True
 
+    # OpenAPI/Swagger 문서 annotation만 변경된 경우도 문서화 변경으로 본다
+    if is_documentation_annotation_only_change(changed_lines):
+        return True
+
     # 메시지가 주석/문서화 중심이어도 실제 코드 구조 변경이 보이면 제외
     if message_has_comment_phrase and not has_structural_code_change(changed_lines):
         return True
@@ -706,12 +832,16 @@ def build_commit_input(commit):
 # LLM 커밋 분석 프롬프트
 # ==========================================
 COMMIT_ANALYSIS_SYSTEM_PROMPT = """
-You are a backend static code analysis assistant for the Collabalyze project.
+You are a static code quality analysis assistant for the Collabalyze project.
+
+The score is produced by the backend analysis pipeline, but the evaluation target is actual source-code quality.
+Evaluate source-code changes across backend, frontend, mobile, client-side, or other implementation code when the visible diff contains real logic or maintainable source changes.
+Do not skip a commit merely because it changes frontend, Android, mobile, UI, or client-side source code.
 
 Your task is to analyze exactly one Git commit and return a strict JSON object with four fields:
 commit_summary, commit_backend_score, analysis_status, score_reason.
 
-You must evaluate only the backend/static-code quality of the commit.
+You must evaluate only the static source-code quality of the commit.
 Do not evaluate collaboration quality, communication quality, commit count, pull request count, issue count, review count, or total contribution volume.
 
 Return only one valid JSON object.
