@@ -22,3 +22,27 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python / Flask backend
+__pycache__/
+*.py[cod]
+*.class
+
+.env
+.env.*
+!.env.example
+
+.venv/
+venv/
+env/
+instance/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+celerybeat-schedule
+celerybeat.pid
+
+flask.log
+celery.log
