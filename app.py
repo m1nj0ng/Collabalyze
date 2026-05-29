@@ -110,6 +110,7 @@ TOKEN_ESTIMATION_CHAR_DIVISOR = 3
 LARGE_DIFF_CHUNK_MAX_CHARS = 6000
 LARGE_DIFF_MAX_CHUNKS = 10
 LARGE_DIFF_MAX_TOTAL_CHARS_FOR_CHUNK_ANALYSIS = 60000
+MAX_LARGE_DIFF_ANALYSIS_LIMIT = 3
 
 # LLM 제공자/모델별 대략 단가(USD / 1M tokens)
 # OpenAI, Claude, Gemini 중 최종 모델은 샘플 테스트 후 결정
@@ -1678,6 +1679,115 @@ def build_policy_based_analysis_result(commit, classification=None):
         "score_reason": score_reason
     }
 
+def calculate_large_diff_chunk_weight(chunk_result):
+    """chunk별 점수 통합에 사용할 가중치 계산"""
+    changed_line_count = chunk_result.get("changed_line_count") or 0
+    return min(math.log1p(max(changed_line_count, 1)), 5.0)
+
+
+def build_large_diff_integrated_summary(commit, classification, chunk_results):
+    """chunk 분석 결과를 바탕으로 large_diff 최종 요약 생성"""
+    topic = infer_large_diff_topic(commit, classification.get("changed_files", []))
+    scoreable_count = sum(
+        1 for result in chunk_results
+        if result.get("has_scoreable_code")
+    )
+
+    if topic:
+        return f"{topic} 관련 변경을 {scoreable_count}개 chunk로 나누어 분석한 대형 커밋임."
+
+    return f"대형 diff를 {scoreable_count}개 구현 chunk로 나누어 정적 코드 품질을 분석함."
+
+
+def build_large_diff_chunk_based_analysis_result(commit, classification):
+    """large_code_diff 커밋을 chunk 단위로 분석해 최종 커밋 분석 결과 생성"""
+    chunk_plan = build_large_diff_chunk_plan(commit)
+
+    if not chunk_plan["can_analyze"]:
+        fallback_result = build_policy_based_analysis_result(commit, classification)
+        fallback_result["score_reason"] = "chunk 분할 제한으로 대형 diff 점수 산정을 보류함."
+        return fallback_result, {
+            "chunk_analysis_status": "pending",
+            "chunk_plan_reason": chunk_plan["reason"],
+            "chunk_count": chunk_plan["chunk_count"],
+            "scoreable_chunk_count": 0
+        }
+
+    chunk_results = []
+
+    for chunk in chunk_plan["chunks"]:
+        try:
+            chunk_input = build_large_diff_chunk_input(
+                commit,
+                classification,
+                chunk,
+                chunk_plan
+            )
+            chunk_result = call_llm_for_large_diff_chunk_analysis(chunk_input)
+
+            chunk_result["chunk_index"] = chunk["chunk_index"]
+            chunk_result["filename"] = chunk["filename"]
+            chunk_result["changed_line_count"] = chunk["changed_line_count"]
+            chunk_result["diff_chars"] = chunk["diff_chars"]
+
+            chunk_results.append(chunk_result)
+
+        except Exception as e:
+            fallback_result = build_policy_based_analysis_result(commit, classification)
+            fallback_result["score_reason"] = "chunk 분석 실패로 대형 diff 점수 산정을 보류함."
+            return fallback_result, {
+                "chunk_analysis_status": "pending",
+                "chunk_plan_reason": "chunk_analysis_failed",
+                "chunk_count": chunk_plan["chunk_count"],
+                "scoreable_chunk_count": 0,
+                "error": str(e)[:1200]
+            }
+
+    scoreable_chunks = [
+        result for result in chunk_results
+        if result.get("has_scoreable_code") and result.get("chunk_score") is not None
+    ]
+
+    if not scoreable_chunks:
+        fallback_result = build_policy_based_analysis_result(commit, classification)
+        fallback_result["score_reason"] = "점수화 가능한 구현 chunk가 없어 대형 diff 점수 산정을 보류함."
+        return fallback_result, {
+            "chunk_analysis_status": "pending",
+            "chunk_plan_reason": "no_scoreable_chunks",
+            "chunk_count": chunk_plan["chunk_count"],
+            "scoreable_chunk_count": 0
+        }
+
+    weighted_score_sum = 0
+    weight_sum = 0
+
+    for chunk_result in scoreable_chunks:
+        weight = calculate_large_diff_chunk_weight(chunk_result)
+        weighted_score_sum += chunk_result["chunk_score"] * weight
+        weight_sum += weight
+
+    final_score = round(weighted_score_sum / weight_sum, 2)
+
+    final_summary = build_large_diff_integrated_summary(
+        commit,
+        classification,
+        chunk_results
+    )
+
+    final_result = {
+        "commit_summary": final_summary,
+        "commit_backend_score": final_score,
+        "analysis_status": "success",
+        "score_reason": "대형 diff를 chunk 단위로 모두 분석해 정적 코드 품질 점수를 산정함."
+    }
+
+    return final_result, {
+        "chunk_analysis_status": "success",
+        "chunk_plan_reason": "ok",
+        "chunk_count": chunk_plan["chunk_count"],
+        "scoreable_chunk_count": len(scoreable_chunks)
+    }
+
 def normalize_commit_summary_style(commit_summary):
     """LLM이 생성한 정중체 요약을 프로젝트 기준의 간결한 명사형/함체로 보정"""
     if commit_summary is None:
@@ -1724,7 +1834,7 @@ def normalize_score_reason_style(score_reason):
 
     return reason
 
-def validate_commit_analysis_result(result, expected_type=None):
+def validate_commit_analysis_result(result, expected_type=None, allow_large_diff_success=False):
     """커밋 분석 결과 JSON이 저장 가능한 형태인지 검증하고 필요한 값만 정리"""
     if not isinstance(result, dict):
         raise ValueError("커밋 분석 결과가 dict 형식이 아닙니다.")
@@ -1788,8 +1898,12 @@ def validate_commit_analysis_result(result, expected_type=None):
     ) and analysis_status != "skipped":
         raise ValueError(f"{expected_type} 커밋은 skipped 상태여야 합니다.")
 
-    if expected_type == "large_code_diff" and analysis_status != "large_diff_pending":
-        raise ValueError("large_code_diff 커밋은 large_diff_pending 상태여야 합니다.")
+    if expected_type == "large_code_diff":
+        if allow_large_diff_success:
+            if analysis_status not in ("success", "large_diff_pending"):
+                raise ValueError("large_code_diff 커밋은 success 또는 large_diff_pending 상태여야 합니다.")
+        elif analysis_status != "large_diff_pending":
+            raise ValueError("large_code_diff 커밋은 large_diff_pending 상태여야 합니다.")
 
     return {
         "commit_summary": commit_summary,
@@ -1851,9 +1965,13 @@ def validate_large_diff_chunk_analysis_result(result):
         "has_scoreable_code": has_scoreable_code
     }
 
-def save_commit_analysis_result(commit, result, expected_type=None):
+def save_commit_analysis_result(commit, result, expected_type=None, allow_large_diff_success=False):
     """검증된 커밋 분석 결과를 CommitDetail row에 반영"""
-    validated_result = validate_commit_analysis_result(result, expected_type=expected_type)
+    validated_result = validate_commit_analysis_result(
+        result,
+        expected_type=expected_type,
+        allow_large_diff_success=allow_large_diff_success
+    )
 
     commit.commit_summary = validated_result["commit_summary"]
     commit.commit_backend_score = validated_result["commit_backend_score"]
@@ -3081,6 +3199,7 @@ def analyze_static_code(project_id):
     request_data = request.get_json(silent=True) or {}
     force = bool(request_data.get("force", False))
     use_llm = bool(request_data.get("use_llm", False))
+    analyze_large_diff = bool(request_data.get("analyze_large_diff", False))
     limit = request_data.get("limit")
     commit_hash_prefix = (request_data.get("commit_hash_prefix") or "").strip()
 
@@ -3108,6 +3227,26 @@ def analyze_static_code(project_id):
                 "limit": 1
             }
         }), 400
+    
+    if analyze_large_diff and not use_llm:
+        return jsonify({
+            "error": "analyze_large_diff=true는 use_llm=true와 함께 사용해야 합니다.",
+            "recommended_body": {
+                "use_llm": True,
+                "analyze_large_diff": True,
+                "limit": 1
+            }
+        }), 400
+
+    if analyze_large_diff and limit is not None and limit > MAX_LARGE_DIFF_ANALYSIS_LIMIT:
+        return jsonify({
+            "error": f"analyze_large_diff=true에서는 limit을 최대 {MAX_LARGE_DIFF_ANALYSIS_LIMIT}까지만 허용합니다.",
+            "recommended_body": {
+                "use_llm": True,
+                "analyze_large_diff": True,
+                "limit": 1
+            }
+        }), 400    
 
     if use_llm and limit > MAX_LLM_ANALYSIS_LIMIT:
         return jsonify({
@@ -3146,6 +3285,60 @@ def analyze_static_code(project_id):
         classification = classify_commit_for_analysis(commit)
         estimated_type = classification["estimated_type"]
 
+        if estimated_type == "large_code_diff" and analyze_large_diff:
+            try:
+                large_diff_result, chunk_meta = build_large_diff_chunk_based_analysis_result(
+                    commit,
+                    classification
+                )
+
+                save_commit_analysis_result(
+                    commit,
+                    large_diff_result,
+                    expected_type=estimated_type,
+                    allow_large_diff_success=True
+                )
+
+                if large_diff_result["analysis_status"] == "success":
+                    llm_processed_count += 1
+                elif large_diff_result["analysis_status"] == "large_diff_pending":
+                    large_diff_pending_count += 1
+                elif large_diff_result["analysis_status"] == "failed":
+                    failed_count += 1
+
+                analyzed_commits.append({
+                    "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                    "estimated_type": estimated_type,
+                    "analysis_status": large_diff_result["analysis_status"],
+                    "commit_backend_score": large_diff_result["commit_backend_score"],
+                    "action": "large_diff_chunk_saved",
+                    "chunk_analysis_status": chunk_meta["chunk_analysis_status"],
+                    "chunk_plan_reason": chunk_meta["chunk_plan_reason"],
+                    "chunk_count": chunk_meta["chunk_count"],
+                    "scoreable_chunk_count": chunk_meta["scoreable_chunk_count"]
+                })
+
+            except Exception as e:
+                commit.commit_summary = "대형 diff chunk 분석 중 오류가 발생함."
+                commit.commit_backend_score = None
+                commit.analysis_status = "large_diff_pending"
+                commit.score_reason = "chunk 분석 오류로 대형 diff 점수 산정을 보류함."
+
+                large_diff_pending_count += 1
+
+                analyzed_commits.append({
+                    "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                    "estimated_type": estimated_type,
+                    "analysis_status": "large_diff_pending",
+                    "commit_backend_score": None,
+                    "action": "large_diff_chunk_failed",
+                    "chunk_analysis_status": "pending",
+                    "chunk_plan_reason": "chunk_unexpected_error",
+                    "error": str(e)[:1200]
+                })
+
+            continue
+        
         analysis_result = build_policy_based_analysis_result(commit, classification)
 
         # code_like는 정책 기반 결과가 없으므로, use_llm=true일 때만 Gemini로 분석
@@ -3258,6 +3451,7 @@ def analyze_static_code(project_id):
         "mode": "llm_enabled" if use_llm else "policy_based_only",
         "force": force,
         "use_llm": use_llm,
+        "analyze_large_diff": analyze_large_diff,
         "limit": limit,
         "commit_hash_prefix": commit_hash_prefix or None,
         "total_targets": total_targets,
