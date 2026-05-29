@@ -11,6 +11,8 @@ import lizard
 import time
 import math
 import json
+from collections import defaultdict
+from sqlalchemy.orm import joinedload
 
 # 환경 변수 로드
 load_dotenv()
@@ -2078,7 +2080,7 @@ def collect_project_data_task(self, project_id):
                                 total_complexity += file_complexity
                             except Exception as e:
                                 # 코드가 깨져있거나(바이너리 파일 등) 파싱에 실패하면 무시하고 다음 파일로 넘어감
-                                pass
+                                print(f"[경고] Lizard 분석 실패: {file.filename} / {e}")
 
                     # 모은 Diff 텍스트들을 하나의 텍스트로 합침
                     final_diff_text = "\n\n".join(diff_texts_list)
@@ -2135,8 +2137,8 @@ def collect_project_data_task(self, project_id):
                         if pr_obj.merged and pr_obj.merged_by:
                             merger_login = pr_obj.merged_by.login
                             
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"[경고] PR #{pr.number} 댓글/리뷰 수집 실패: {e}")
                         
                     comments_text = "\n".join(comments_list) # 댓글들을 엔터 단위로 하나의 문자열로 합침
 
@@ -2174,8 +2176,8 @@ def collect_project_data_task(self, project_id):
                     try:
                         for comment in issue.get_comments():
                             comments_list.append(f"[{comment.user.login}]: {comment.body}")
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"[경고] Issue #{issue.number} 댓글 수집 실패: {e}")
                         
                     comments_text = "\n".join(comments_list)
 
@@ -2923,6 +2925,7 @@ def get_project_contributions(project_id):
 
     contributions = (
         ContributionData.query
+        .options(joinedload(ContributionData.user))
         .filter_by(project_id=project.id)
         .order_by(
             ContributionData.commits.desc(),
@@ -2933,18 +2936,46 @@ def get_project_contributions(project_id):
         .all()
     )
     
+    all_commits = (
+        CommitDetail.query
+        .filter_by(project_id=project.id)
+        .order_by(CommitDetail.committed_at.desc())
+        .all()
+    )
+
+    all_prs = (
+        PullRequestDetail.query
+        .filter_by(project_id=project.id)
+        .order_by(PullRequestDetail.pr_number.desc())
+        .all()
+    )
+
+    all_issues = (
+        IssueDetail.query
+        .filter_by(project_id=project.id)
+        .order_by(IssueDetail.issue_number.desc())
+        .all()
+    )
+
+    commits_by_user = defaultdict(list)
+    for commit in all_commits:
+        commits_by_user[commit.user_id].append(commit)
+
+    prs_by_user = defaultdict(list)
+    for pr in all_prs:
+        prs_by_user[pr.user_id].append(pr)
+
+    issues_by_user = defaultdict(list)
+    for issue in all_issues:
+        issues_by_user[issue.user_id].append(issue)
+
     result = []
     for c in contributions:
         user_id = c.user_id
         
         # [데이터 1] 커밋 내역 (메시지 + 날짜 + 요약)
         # diff_text는 백엔드 분석용이므로 여기서는 제외하고 AI 팀원용 데이터만 구성
-        commits = (
-            CommitDetail.query
-            .filter_by(user_id=user_id, project_id=project.id)
-            .order_by(CommitDetail.committed_at.desc())
-            .all()
-        )
+        commits = commits_by_user[user_id]
         commit_data_list = []
         for commit in commits:
             commit_data_list.append({
@@ -2994,15 +3025,8 @@ def get_project_contributions(project_id):
             else None
         )
         
-        total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
-        
         # [데이터 2] PR 내역 (제목, 본문, 댓글, 상태, 날짜)
-        prs = (
-            PullRequestDetail.query
-            .filter_by(user_id=user_id, project_id=project.id)
-            .order_by(PullRequestDetail.pr_number.desc())
-            .all()
-        )
+        prs = prs_by_user[user_id]
         pr_data_list = []
         for pr in prs:
             pr_data_list.append({
@@ -3017,12 +3041,7 @@ def get_project_contributions(project_id):
             })
 
         # [데이터 3] 이슈 내역 (제목, 본문, 댓글, 상태, 날짜)
-        issues = (
-            IssueDetail.query
-            .filter_by(user_id=user_id, project_id=project.id)
-            .order_by(IssueDetail.issue_number.desc())
-            .all()
-        )
+        issues = issues_by_user[user_id]
         issue_data_list = []
         for issue in issues:
             issue_data_list.append({
