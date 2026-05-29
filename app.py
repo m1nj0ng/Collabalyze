@@ -104,6 +104,11 @@ ESTIMATED_PROMPT_OVERHEAD_CHARS = 1800
 ESTIMATED_OUTPUT_TOKENS_PER_COMMIT = 250
 TOKEN_ESTIMATION_CHAR_DIVISOR = 3
 
+# large_diff chunk 분석용 안전 기준
+LARGE_DIFF_CHUNK_MAX_CHARS = 6000
+LARGE_DIFF_MAX_CHUNKS = 10
+LARGE_DIFF_MAX_TOTAL_CHARS_FOR_CHUNK_ANALYSIS = 60000
+
 # LLM 제공자/모델별 대략 단가(USD / 1M tokens)
 # OpenAI, Claude, Gemini 중 최종 모델은 샘플 테스트 후 결정
 # 실제 과금 전 각 제공자의 공식 가격표 기준으로 재확인 필요
@@ -476,6 +481,143 @@ def get_diff_change_line_counts(diff_text):
             deleted_count += 1
 
     return added_count, deleted_count
+
+def split_diff_text_by_file(diff_text):
+    """저장된 diff_text를 파일 단위 diff 블록으로 분리"""
+    file_blocks = []
+    current_filename = None
+    current_lines = []
+
+    for line in (diff_text or "").splitlines():
+        if line.startswith("--- ") and line.endswith(" ---"):
+            if current_filename and current_lines:
+                file_blocks.append({
+                    "filename": current_filename,
+                    "diff_text": "\n".join(current_lines)
+                })
+
+            current_filename = line[4:-4].strip() or "unknown"
+            current_lines = [line]
+            continue
+
+        if current_filename:
+            current_lines.append(line)
+
+    if current_filename and current_lines:
+        file_blocks.append({
+            "filename": current_filename,
+            "diff_text": "\n".join(current_lines)
+        })
+
+    # 예외적으로 파일 구분 헤더가 없는 diff도 하나의 블록으로 보존
+    if not file_blocks and (diff_text or "").strip():
+        file_blocks.append({
+            "filename": "unknown",
+            "diff_text": diff_text.strip()
+        })
+
+    return file_blocks
+
+
+def split_large_file_diff_to_parts(filename, file_diff_text, max_chars=LARGE_DIFF_CHUNK_MAX_CHARS):
+    """파일 하나의 diff가 너무 클 경우 문자 수 기준으로 여러 part로 분할"""
+    if len(file_diff_text or "") <= max_chars:
+        return [file_diff_text]
+
+    lines = (file_diff_text or "").splitlines()
+    if not lines:
+        return []
+
+    header = lines[0] if lines[0].startswith("--- ") and lines[0].endswith(" ---") else f"--- {filename} ---"
+    body_lines = lines[1:] if lines and lines[0] == header else lines
+
+    parts = []
+    current_lines = [header]
+
+    for line in body_lines:
+        candidate = "\n".join(current_lines + [line])
+
+        if len(candidate) > max_chars and len(current_lines) > 1:
+            parts.append("\n".join(current_lines))
+            current_lines = [header, line]
+        else:
+            current_lines.append(line)
+
+    if len(current_lines) > 1:
+        parts.append("\n".join(current_lines))
+
+    return parts
+
+
+def build_large_diff_chunk_plan(commit):
+    """large_diff 커밋을 chunk 분석할 수 있는지 판단하고 chunk 목록을 생성"""
+    diff_text = commit.diff_text or ""
+    total_diff_chars = len(diff_text)
+
+    if not diff_text.strip():
+        return {
+            "can_analyze": False,
+            "reason": "empty_diff",
+            "chunks": [],
+            "total_diff_chars": total_diff_chars,
+            "chunk_count": 0
+        }
+
+    if total_diff_chars > LARGE_DIFF_MAX_TOTAL_CHARS_FOR_CHUNK_ANALYSIS:
+        return {
+            "can_analyze": False,
+            "reason": "diff_too_large_for_chunk_analysis",
+            "chunks": [],
+            "total_diff_chars": total_diff_chars,
+            "chunk_count": 0
+        }
+
+    file_blocks = split_diff_text_by_file(diff_text)
+    chunks = []
+
+    for file_block in file_blocks:
+        filename = file_block["filename"]
+        file_diff_text = file_block["diff_text"]
+        parts = split_large_file_diff_to_parts(filename, file_diff_text)
+
+        for part_index, part_text in enumerate(parts, start=1):
+            added_count, deleted_count = get_diff_change_line_counts(part_text)
+
+            chunks.append({
+                "chunk_index": len(chunks) + 1,
+                "filename": filename,
+                "part_index": part_index,
+                "part_count": len(parts),
+                "diff_text": part_text,
+                "diff_chars": len(part_text),
+                "changed_line_count": added_count + deleted_count
+            })
+
+            if len(chunks) > LARGE_DIFF_MAX_CHUNKS:
+                return {
+                    "can_analyze": False,
+                    "reason": "too_many_chunks",
+                    "chunks": [],
+                    "total_diff_chars": total_diff_chars,
+                    "chunk_count": len(chunks)
+                }
+
+    if not chunks:
+        return {
+            "can_analyze": False,
+            "reason": "no_chunks_created",
+            "chunks": [],
+            "total_diff_chars": total_diff_chars,
+            "chunk_count": 0
+        }
+
+    return {
+        "can_analyze": True,
+        "reason": "ok",
+        "chunks": chunks,
+        "total_diff_chars": total_diff_chars,
+        "chunk_count": len(chunks)
+    }
 
 def get_diff_changed_lines_by_file(diff_text):
     """Diff에서 파일별 실제 추가/삭제 라인을 추출"""
