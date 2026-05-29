@@ -11,6 +11,7 @@ import lizard
 import time
 import math
 import json
+from urllib.parse import urlencode
 from collections import defaultdict
 from sqlalchemy.orm import joinedload
 
@@ -72,6 +73,8 @@ celery = make_celery(app)
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
 
@@ -124,6 +127,13 @@ LLM_PRICING_TABLE = {
         "output_per_1m": 5.00
     }
 }
+
+# Lizard 복잡도 분석에서 제외할 파일 확장자 기준
+LIZARD_IGNORE_EXTENSIONS = (
+    '.md', '.txt', '.png', '.jpg', '.jpeg', '.gif',
+    '.json', '.csv', '.yml', '.yaml',
+    '.lock', '.svg', '.ico'
+)
 
 # 문서/설정 중심 커밋을 대략 구분하기 위한 파일 기준
 DOC_OR_CONFIG_EXTENSIONS = (
@@ -347,6 +357,52 @@ DELETION_ONLY_MAX_LOC_CHANGE = 500
 DELETION_ONLY_MAX_DIFF_CHARS = 20000
 DELETION_ONLY_MAX_FILES = 10
 
+DOC_OR_CONFIG_FILENAMES_LOWER = frozenset(
+    name.lower() for name in DOC_OR_CONFIG_FILENAMES
+)
+
+DOC_OR_CONFIG_BASENAME_PREFIXES_LOWER = tuple(
+    name.lower() for name in DOC_OR_CONFIG_BASENAME_PREFIXES
+)
+
+PACKAGE_METADATA_FILES_LOWER = frozenset(
+    name.lower() for name in PACKAGE_METADATA_FILES
+)
+
+DOCUMENTATION_ANNOTATION_PREFIXES_LOWER = tuple(
+    prefix.lower() for prefix in DOCUMENTATION_ANNOTATION_PREFIXES
+)
+
+TEST_PATH_MARKERS = (
+    "tests/",
+    "test/",
+    "__tests__/",
+    "cypress/",
+    "src/test/",
+    "/tests/",
+    "/test/",
+    "/__tests__/",
+    "/cypress/",
+    "/src/test/"
+)
+
+TEST_FILE_SUFFIXES = (
+    "_test.py",
+    "_tests.py",
+    ".test.js",
+    ".test.jsx",
+    ".test.ts",
+    ".test.tsx",
+    ".spec.js",
+    ".spec.jsx",
+    ".spec.ts",
+    ".spec.tsx",
+    "_test.java",
+    "_tests.java",
+    "_test.kt",
+    "_tests.kt"
+)
+
 # ==========================================
 # LLM 분석 공통 Helper 함수
 # ==========================================
@@ -367,15 +423,15 @@ def is_doc_or_config_file(filename):
     lower_basename = os.path.basename(filename or "").lower()
     _, extension = os.path.splitext(lower_basename)
 
-    doc_or_config_filenames = tuple(name.lower() for name in DOC_OR_CONFIG_FILENAMES)
-    doc_or_config_prefixes = tuple(name.lower() for name in DOC_OR_CONFIG_BASENAME_PREFIXES)
-
     return (
         lower_filename.endswith(DOC_OR_CONFIG_EXTENSIONS)
-        or lower_basename in doc_or_config_filenames
+        or lower_basename in DOC_OR_CONFIG_FILENAMES_LOWER
         or (
             not extension
-            and any(lower_basename.startswith(prefix) for prefix in doc_or_config_prefixes)
+            and any(
+                lower_basename.startswith(prefix)
+                for prefix in DOC_OR_CONFIG_BASENAME_PREFIXES_LOWER
+            )
         )
     )
 
@@ -487,8 +543,8 @@ def is_documentation_annotation_only_change(changed_lines):
     changed_text = "\n".join(non_empty_lines).lower()
 
     has_documentation_annotation = any(
-        prefix.lower() in changed_text
-        for prefix in DOCUMENTATION_ANNOTATION_PREFIXES
+        prefix in changed_text
+        for prefix in DOCUMENTATION_ANNOTATION_PREFIXES_LOWER
     )
 
     if not has_documentation_annotation:
@@ -501,7 +557,7 @@ def is_documentation_annotation_only_change(changed_lines):
         if is_comment_or_docstring_like_line(stripped):
             continue
 
-        if lower_stripped.startswith(tuple(prefix.lower() for prefix in DOCUMENTATION_ANNOTATION_PREFIXES)):
+        if lower_stripped.startswith(DOCUMENTATION_ANNOTATION_PREFIXES_LOWER):
             continue
 
         compact_line = lower_stripped.strip(" \t,;(){}[]")
@@ -569,46 +625,16 @@ def is_test_file(filename):
     normalized = (filename or "").replace("\\", "/").lower()
     basename = os.path.basename(normalized)
 
-    test_path_markers = (
-        "tests/",
-        "test/",
-        "__tests__/",
-        "cypress/",
-        "src/test/",
-        "/tests/",
-        "/test/",
-        "/__tests__/",
-        "/cypress/",
-        "/src/test/"
-    )
-
-    test_suffixes = (
-        "_test.py",
-        "_tests.py",
-        ".test.js",
-        ".test.jsx",
-        ".test.ts",
-        ".test.tsx",
-        ".spec.js",
-        ".spec.jsx",
-        ".spec.ts",
-        ".spec.tsx",
-        "_test.java",
-        "_tests.java",
-        "_test.kt",
-        "_tests.kt"
-    )
-
     return (
-        any(marker in normalized for marker in test_path_markers)
+        any(marker in normalized for marker in TEST_PATH_MARKERS)
         or basename.startswith("test_")
-        or basename.endswith(test_suffixes)
+        or basename.endswith(TEST_FILE_SUFFIXES)
     )
 
 def is_package_metadata_file(filename):
     """패키지 배포 메타데이터 파일인지 판별"""
     lower_basename = os.path.basename(filename or "").lower()
-    return lower_basename in tuple(name.lower() for name in PACKAGE_METADATA_FILES)
+    return lower_basename in PACKAGE_METADATA_FILES_LOWER
 
 def is_package_metadata_only_commit(commit, changed_files, diff_chars):
     """패키지 버전/배포 메타데이터만 바뀐 커밋인지 보수적으로 판별"""
@@ -1874,16 +1900,34 @@ def github_callback():
         },
         headers={'Accept': 'application/json'}
     )
-    access_token = token_response.json().get('access_token')
+
+    if token_response.status_code != 200:
+        return jsonify({"error": "GitHub Access Token 요청에 실패했습니다."}), 401
+
+    token_data = token_response.json()
+    access_token = token_data.get('access_token')
+
+    if not access_token:
+        return jsonify({
+            "error": "GitHub 인증에 실패했습니다.",
+            "detail": token_data.get("error_description") or token_data.get("error")
+        }), 401
 
     # 4. 발급받은 Access Token을 사용하여 사용자 프로필 정보 조회
     user_response = requests.get(
         'https://api.github.com/user',
         headers={'Authorization': f'token {access_token}'}
     )
+
+    if user_response.status_code != 200:
+        return jsonify({"error": "GitHub 사용자 정보 조회에 실패했습니다."}), 401
+
     user_info = user_response.json()
     github_id = user_info.get('login')
-    profile_image = user_info.get('avatar_url')
+    profile_image = user_info.get('avatar_url') or ""
+
+    if not github_id:
+        return jsonify({"error": "GitHub 사용자 ID를 찾을 수 없습니다."}), 401
 
     # 5. 데이터베이스에 사용자 정보 저장 (기존 사용자인 경우 토큰 및 프로필 업데이트)
     user = User.query.filter_by(github_id=github_id).first()
@@ -1897,10 +1941,16 @@ def github_callback():
     # 트랜잭션 커밋
     db.session.commit() 
 
-    # 6. [임시 수정] 승훈님 로컬 테스트를 위해 리다이렉트 주소를 localhost로 변경
-    # 작업이 완료되면 나중에 다시 진짜 Vercel 주소로 원상복구해야 함
-    vercel_redirect_url = f"http://localhost:5173?user_id={user.id}&github_id={github_id}&profile_image={user.profile_image}"
-    return redirect(vercel_redirect_url)
+    # 6. 프론트엔드 주소로 사용자 정보를 쿼리 파라미터에 담아 리다이렉트
+    # FRONTEND_URL 환경변수로 로컬/Vercel 주소를 전환할 수 있음
+    params = urlencode({
+        "user_id": user.id,
+        "github_id": github_id,
+        "profile_image": user.profile_image or ""
+    })
+
+    frontend_redirect_url = f"{FRONTEND_URL}?{params}"
+    return redirect(frontend_redirect_url)
 
 # ==========================================
 # 3.5. 특정 유저의 전체 GitHub Repository 목록 조회 API
@@ -1942,11 +1992,13 @@ def get_user_repos(user_id):
 @app.route('/api/projects', methods=['POST'])
 def register_project():
     # 1. 클라이언트(프론트엔드)로부터 JSON 데이터 수신
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     repo_url = data.get('repo_url')
 
-    if not repo_url:
+    if not isinstance(repo_url, str) or not repo_url.strip():
         return jsonify({"error": "repo_url 데이터가 누락되었습니다."}), 400
+
+    repo_url = repo_url.strip()
 
     # 2. URL에서 레포지토리 이름(owner/repo) 추출 
     # 예: https://github.com/m1nj0ng/Collabalyze -> m1nj0ng/Collabalyze
@@ -2030,9 +2082,6 @@ def collect_project_data_task(self, project_id):
             commit_count = 0
             total_loc_added = 0    # 유저의 총 추가 라인 누적 변수
             total_loc_deleted = 0  # 유저의 총 삭제 라인 누적 변수
-
-            # API 호출 낭비를 막기 위해 아예 분석할 필요가 없는 파일 확장자 목록
-            IGNORE_EXTENSIONS = ('.md', '.txt', '.png', '.jpg', '.jpeg', '.gif', '.json', '.csv', '.yml', '.yaml')
             
             for c in commits:
                 # (NEW) 부모 커밋이 2개 이상인 경우 = 남이 누른 '머지 커밋'이므로 도둑질 방지를 위해 무시
@@ -2067,7 +2116,7 @@ def collect_project_data_task(self, project_id):
                             diff_texts_list.append(f"--- {file.filename} ---\n{file.patch}")
                             
                         # 1. 무시할 확장자가 아니고, 삭제된 파일이 아닌 경우에만 진행
-                        if not file.filename.lower().endswith(IGNORE_EXTENSIONS) and file.status != 'removed':
+                        if not file.filename.lower().endswith(LIZARD_IGNORE_EXTENSIONS) and file.status != 'removed':
                             try:
                                 # 2. 깃허브 API를 찔러서 해당 시점(c.sha)의 파일 원본 코드를 가져옴
                                 file_content = repo.get_contents(file.filename, ref=c.sha).decoded_content.decode('utf-8')
