@@ -1222,6 +1222,87 @@ def get_commit_message_title(commit):
 
     return commit.message.splitlines()[0].strip()
 
+def infer_large_diff_topic(commit, changed_files):
+    """대형 diff 커밋의 변경 주제를 메시지/파일명/diff 일부로 보수적으로 추정"""
+    message = (commit.message or "").lower()
+    files_text = " ".join(changed_files or []).lower()
+    diff_preview = (commit.diff_text or "")[:MAX_DIFF_CHARS].lower()
+
+    topic_text = "\n".join([message, files_text, diff_preview])
+
+    topic_rules = (
+        (
+            (
+                "llm", "openai", "gemini", "prompt",
+                "commit_summary", "commit_backend_score",
+                "analysis_status", "score_reason",
+                "analyze-static-code", "analysis-estimate",
+                "response_schema", "json_schema"
+            ),
+            "LLM 커밋 분석 및 정적 코드 점수 산정"
+        ),
+        (
+            (
+                "github", "commitdetail", "pullrequestdetail", "issuedetail",
+                "contributiondata", "collect_project_data",
+                "get_commits", "get_pull", "get_review_comments",
+                "contributions", "merged_by"
+            ),
+            "GitHub 데이터 수집 및 contributions 응답"
+        ),
+        (
+            (
+                "oauth", "github_callback", "access_token",
+                "redirect", "frontend_url", "vercel", "localhost",
+                "auth", "callback"
+            ),
+            "GitHub 로그인 및 프론트엔드 연동"
+        ),
+        (
+            (
+                "sqlalchemy", "db.session", "db.column",
+                "database", "migration", "model", "column",
+                "postgresql"
+            ),
+            "DB 모델 및 데이터 저장 구조"
+        ),
+        (
+            (
+                "celery", "redis", "task", "asyncresult",
+                "broker", "result_backend", "collect_project_data_task"
+            ),
+            "비동기 수집 작업 및 Celery 처리"
+        ),
+        (
+            (
+                "react", "jsx", "tsx", "component",
+                "dashboard", "loadingpage", "mainpage",
+                "android", "kotlin", "compose", "fragment",
+                "activity", "screen", "css"
+            ),
+            "프론트엔드 또는 클라이언트 구현"
+        ),
+        (
+            (
+                "pytest", "unittest", "coverage", "mock",
+                "src/test", "tests/", "test_", ".spec.", ".test."
+            ),
+            "테스트 코드 및 검증 로직"
+        ),
+        (
+            (
+                "timezone", "time zone", "dst",
+                "datetime", "schedule"
+            ),
+            "시간대 및 일정 처리"
+        )
+    )
+
+    for keywords, topic in topic_rules:
+        if any(keyword in topic_text for keyword in keywords):
+            return topic
+
+    return None
 
 def build_policy_based_summary(commit, classification):
     """LLM 호출 없이 커밋 유형별 보수적 요약 생성"""
@@ -1268,11 +1349,25 @@ def build_policy_based_summary(commit, classification):
     if estimated_type == "large_code_diff":
         lower_message = (commit.message or "").lower()
         lower_files = " ".join(changed_files).lower()
+        topic = infer_large_diff_topic(commit, changed_files)
 
-        if "timezone" in lower_message or "timezone" in lower_files or "dst" in lower_message:
-            return "타임존 및 DST 처리 로직과 관련 테스트가 크게 변경된 대형 커밋임."
+        has_test_signal = (
+            "pytest" in lower_message
+            or "unittest" in lower_message
+            or "coverage" in lower_message
+            or "src/test" in lower_files
+            or "tests/" in lower_files
+            or ".test." in lower_files
+            or ".spec." in lower_files
+        )
 
-        if "test" in lower_message or "test" in lower_files:
+        if topic and has_test_signal:
+            return f"{topic} 관련 로직과 테스트가 크게 변경된 대형 커밋임."
+
+        if topic:
+            return f"{topic} 관련 로직이 크게 변경된 대형 커밋임."
+
+        if has_test_signal:
             return "코드 로직과 관련 테스트가 크게 변경된 대형 커밋임."
 
         return "코드 중심 변경 규모가 커 별도 분석이 필요한 대형 커밋임."
