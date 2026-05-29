@@ -2921,7 +2921,17 @@ def get_project_contributions(project_id):
     if not project:
         return jsonify({"error": "해당 프로젝트를 찾을 수 없습니다."}), 404
 
-    contributions = ContributionData.query.filter_by(project_id=project.id).order_by(ContributionData.commits.desc()).all()
+    contributions = (
+        ContributionData.query
+        .filter_by(project_id=project.id)
+        .order_by(
+            ContributionData.commits.desc(),
+            ContributionData.pull_requests.desc(),
+            ContributionData.code_reviews.desc(),
+            ContributionData.loc_added.desc()
+        )
+        .all()
+    )
     
     result = []
     for c in contributions:
@@ -2929,7 +2939,12 @@ def get_project_contributions(project_id):
         
         # [데이터 1] 커밋 내역 (메시지 + 날짜 + 요약)
         # diff_text는 백엔드 분석용이므로 여기서는 제외하고 AI 팀원용 데이터만 구성
-        commits = CommitDetail.query.filter_by(user_id=user_id, project_id=project.id).all()
+        commits = (
+            CommitDetail.query
+            .filter_by(user_id=user_id, project_id=project.id)
+            .order_by(CommitDetail.committed_at.desc())
+            .all()
+        )
         commit_data_list = []
         for commit in commits:
             commit_data_list.append({
@@ -2982,7 +2997,12 @@ def get_project_contributions(project_id):
         total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
         
         # [데이터 2] PR 내역 (제목, 본문, 댓글, 상태, 날짜)
-        prs = PullRequestDetail.query.filter_by(user_id=user_id, project_id=project.id).all()
+        prs = (
+            PullRequestDetail.query
+            .filter_by(user_id=user_id, project_id=project.id)
+            .order_by(PullRequestDetail.pr_number.desc())
+            .all()
+        )
         pr_data_list = []
         for pr in prs:
             pr_data_list.append({
@@ -2997,7 +3017,12 @@ def get_project_contributions(project_id):
             })
 
         # [데이터 3] 이슈 내역 (제목, 본문, 댓글, 상태, 날짜)
-        issues = IssueDetail.query.filter_by(user_id=user_id, project_id=project.id).all()
+        issues = (
+            IssueDetail.query
+            .filter_by(user_id=user_id, project_id=project.id)
+            .order_by(IssueDetail.issue_number.desc())
+            .all()
+        )
         issue_data_list = []
         for issue in issues:
             issue_data_list.append({
