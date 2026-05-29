@@ -1261,8 +1261,9 @@ def infer_large_diff_topic(commit, changed_files):
         (
             (
                 "sqlalchemy", "db.session", "db.column",
-                "database", "migration", "model", "column",
-                "postgresql"
+                "db.model", "foreignkey", "primary_key",
+                "nullable=", "postgresql", "alter table",
+                "create table", "alembic", "migrations/versions"
             ),
             "DB 모델 및 데이터 저장 구조"
         ),
