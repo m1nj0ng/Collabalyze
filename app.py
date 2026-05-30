@@ -530,6 +530,86 @@ def split_large_file_diff_to_parts(filename, file_diff_text, max_chars=LARGE_DIF
 
     return parts
 
+def make_large_diff_chunk(filename, filenames, diff_text, part_index=1, part_count=1):
+    """large_diff 분석용 chunk dict 생성"""
+    added_count, deleted_count = get_diff_change_line_counts(diff_text)
+
+    return {
+        "filename": filename,
+        "filenames": filenames,
+        "part_index": part_index,
+        "part_count": part_count,
+        "diff_text": diff_text,
+        "diff_chars": len(diff_text),
+        "changed_line_count": added_count + deleted_count
+    }
+
+
+def pack_file_diff_blocks_into_chunks(file_blocks, max_chars=LARGE_DIFF_CHUNK_MAX_CHARS):
+    """작은 파일 diff들을 max_chars 이하로 묶어 chunk 수를 줄임"""
+    chunks = []
+    current_texts = []
+    current_filenames = []
+
+    def flush_current_chunk():
+        if not current_texts:
+            return
+
+        packed_text = "\n\n".join(current_texts)
+        display_filename = (
+            current_filenames[0]
+            if len(current_filenames) == 1
+            else ", ".join(current_filenames[:3]) + (" 외" if len(current_filenames) > 3 else "")
+        )
+
+        chunks.append(
+            make_large_diff_chunk(
+                filename=display_filename,
+                filenames=list(current_filenames),
+                diff_text=packed_text
+            )
+        )
+
+        current_texts.clear()
+        current_filenames.clear()
+
+    for file_block in file_blocks:
+        filename = file_block["filename"]
+        file_diff_text = file_block["diff_text"]
+
+        # 파일 하나가 너무 크면 기존 방식대로 파일 내부를 part로 분할
+        if len(file_diff_text) > max_chars:
+            flush_current_chunk()
+
+            parts = split_large_file_diff_to_parts(filename, file_diff_text, max_chars=max_chars)
+            for part_index, part_text in enumerate(parts, start=1):
+                chunks.append(
+                    make_large_diff_chunk(
+                        filename=filename,
+                        filenames=[filename],
+                        diff_text=part_text,
+                        part_index=part_index,
+                        part_count=len(parts)
+                    )
+                )
+
+            continue
+
+        candidate_texts = current_texts + [file_diff_text]
+        candidate_text = "\n\n".join(candidate_texts)
+
+        if current_texts and len(candidate_text) > max_chars:
+            flush_current_chunk()
+
+        current_texts.append(file_diff_text)
+        current_filenames.append(filename)
+
+    flush_current_chunk()
+
+    for index, chunk in enumerate(chunks, start=1):
+        chunk["chunk_index"] = index
+
+    return chunks
 
 def build_large_diff_chunk_plan(commit):
     """large_diff 커밋을 chunk 분석할 수 있는지 판단하고 chunk 목록을 생성"""
@@ -555,34 +635,16 @@ def build_large_diff_chunk_plan(commit):
         }
 
     file_blocks = split_diff_text_by_file(diff_text)
-    chunks = []
+    chunks = pack_file_diff_blocks_into_chunks(file_blocks)
 
-    for file_block in file_blocks:
-        filename = file_block["filename"]
-        file_diff_text = file_block["diff_text"]
-        parts = split_large_file_diff_to_parts(filename, file_diff_text)
-
-        for part_index, part_text in enumerate(parts, start=1):
-            added_count, deleted_count = get_diff_change_line_counts(part_text)
-
-            chunks.append({
-                "chunk_index": len(chunks) + 1,
-                "filename": filename,
-                "part_index": part_index,
-                "part_count": len(parts),
-                "diff_text": part_text,
-                "diff_chars": len(part_text),
-                "changed_line_count": added_count + deleted_count
-            })
-
-            if len(chunks) > LARGE_DIFF_MAX_CHUNKS:
-                return {
-                    "can_analyze": False,
-                    "reason": "too_many_chunks",
-                    "chunks": [],
-                    "total_diff_chars": total_diff_chars,
-                    "chunk_count": len(chunks)
-                }
+    if len(chunks) > LARGE_DIFF_MAX_CHUNKS:
+        return {
+            "can_analyze": False,
+            "reason": "too_many_chunks",
+            "chunks": [],
+            "total_diff_chars": total_diff_chars,
+            "chunk_count": len(chunks)
+        }
 
     if not chunks:
         return {
@@ -1061,6 +1123,7 @@ def build_large_diff_chunk_input(commit, classification, chunk, chunk_plan):
         "chunk_count": chunk_plan["chunk_count"],
         "chunk_index": chunk["chunk_index"],
         "filename": chunk["filename"],
+        "filenames": chunk.get("filenames", [chunk["filename"]]),
         "part_index": chunk["part_index"],
         "part_count": chunk["part_count"],
         "diff_chars": chunk["diff_chars"],
@@ -1818,6 +1881,23 @@ def build_large_diff_chunk_based_analysis_result(commit, classification):
     if not scoreable_chunks:
         fallback_result = build_policy_based_analysis_result(commit, classification)
         fallback_result["score_reason"] = "점수화 가능한 구현 chunk가 없어 대형 diff 점수 산정을 보류함."
+
+        try:
+            final_summary_input = build_large_diff_final_summary_input(
+                commit,
+                classification,
+                chunk_results,
+                None
+            )
+            final_summary_result = call_openai_for_large_diff_final_summary(
+                final_summary_input
+            )
+            fallback_result["commit_summary"] = final_summary_result["commit_summary"]
+            fallback_result["score_reason"] = final_summary_result["score_reason"]
+
+        except Exception as e:
+            print(f"[경고] no_scoreable large_diff 최종 요약 생성 실패: {e}")
+
         return fallback_result, {
             "chunk_analysis_status": "pending",
             "chunk_plan_reason": "no_scoreable_chunks",
@@ -3341,7 +3421,7 @@ def analyze_static_code(project_id):
                 elif large_diff_result["analysis_status"] == "failed":
                     failed_count += 1
 
-                analyzed_commits.append({
+                large_diff_commit_result = {
                     "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
                     "estimated_type": estimated_type,
                     "analysis_status": large_diff_result["analysis_status"],
@@ -3351,7 +3431,12 @@ def analyze_static_code(project_id):
                     "chunk_plan_reason": chunk_meta["chunk_plan_reason"],
                     "chunk_count": chunk_meta["chunk_count"],
                     "scoreable_chunk_count": chunk_meta["scoreable_chunk_count"]
-                })
+                }
+
+                if chunk_meta.get("error"):
+                    large_diff_commit_result["error"] = chunk_meta["error"]
+
+                analyzed_commits.append(large_diff_commit_result)
 
             except Exception as e:
                 commit.commit_summary = "대형 diff chunk 분석 중 오류가 발생함."
