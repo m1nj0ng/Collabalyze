@@ -1460,11 +1460,14 @@ Rules:
 - Use null if this chunk is documentation-only, config-only, test-only, comment-only, deletion-only, generated-only, or otherwise not directly scoreable.
 - Do not score based on file size alone.
 - Do not give a default score when evidence is insufficient.
+- If has_scoreable_code is false, chunk_score must be null.
+- If chunk_score is a number, has_scoreable_code must be true.
 
 3. has_scoreable_code
 - true only when the chunk contains actual implementation code changes.
 - Frontend, mobile, Android, client-side, backend, Java, Kotlin, Python, JavaScript, TypeScript, and React code can all be scoreable if they contain real implementation changes.
 - false for docs, config, tests only, comments only, generated files, package metadata, formatting-only, or deletion-only changes.
+- Static image/vector drawable resources may be summarized, but if they do not contain maintainable implementation logic, mark has_scoreable_code as false and chunk_score as null.
 
 4. chunk_reason
 - Write in Korean.
@@ -2118,11 +2121,13 @@ def validate_large_diff_chunk_analysis_result(result):
         if chunk_score < 0 or chunk_score > 100:
             raise ValueError("chunk_score는 0 이상 100 이하이어야 합니다.")
 
+    # LLM이 has_scoreable_code와 chunk_score를 모순되게 반환할 수 있으므로
+    # 전체 large_diff 분석을 실패시키지 않고 보수적으로 정리한다.
     if has_scoreable_code and chunk_score is None:
-        raise ValueError("scoreable chunk는 chunk_score가 필요합니다.")
+        has_scoreable_code = False
 
     if not has_scoreable_code and chunk_score is not None:
-        raise ValueError("scoreable이 아닌 chunk는 chunk_score가 null이어야 합니다.")
+        chunk_score = None
 
     return {
         "chunk_summary": chunk_summary,
