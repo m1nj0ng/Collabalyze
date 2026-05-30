@@ -89,6 +89,11 @@ OPENAI_MAX_OUTPUT_TOKENS = 900
 OPENAI_CHUNK_MAX_OUTPUT_TOKENS = 650
 OPENAI_FINAL_SUMMARY_MAX_OUTPUT_TOKENS = 500
 
+# 사용자별 backend_code_score 집계 기준
+BACKEND_SCORE_METHOD = "capped_log_loc_weighted_average"
+BACKEND_SCORE_MIN_WEIGHT = 1.0
+BACKEND_SCORE_MAX_WEIGHT = 5.0
+
 # ==========================================
 # LLM 분석 비용/토큰 추정용 설정값
 # ==========================================
@@ -1956,6 +1961,52 @@ def build_large_diff_chunk_based_analysis_result(commit, classification):
         "chunk_count": chunk_plan["chunk_count"],
         "scoreable_chunk_count": len(scoreable_chunks)
     }
+
+def calculate_commit_backend_score_weight(commit):
+    """커밋 변경량을 기반으로 backend_code_score 집계 가중치 계산"""
+    loc_changed = max((commit.loc_added or 0) + (commit.loc_deleted or 0), 0)
+
+    return min(
+        max(math.log1p(loc_changed), BACKEND_SCORE_MIN_WEIGHT),
+        BACKEND_SCORE_MAX_WEIGHT
+    )
+
+
+def calculate_backend_code_score(commits):
+    """커밋별 정적 코드 점수를 capped log LOC 가중 평균으로 집계"""
+    weighted_score_sum = 0.0
+    weight_sum = 0.0
+    scored_commit_count = 0
+
+    for commit in commits:
+        if commit.commit_backend_score is None:
+            continue
+
+        weight = calculate_commit_backend_score_weight(commit)
+        weighted_score_sum += commit.commit_backend_score * weight
+        weight_sum += weight
+        scored_commit_count += 1
+
+    if scored_commit_count == 0 or weight_sum == 0:
+        return {
+            "backend_code_score": None,
+            "backend_score_method": BACKEND_SCORE_METHOD,
+            "backend_score_total_weight": 0.0
+        }
+
+    return {
+        "backend_code_score": round(weighted_score_sum / weight_sum, 2),
+        "backend_score_method": BACKEND_SCORE_METHOD,
+        "backend_score_total_weight": round(weight_sum, 2)
+    }
+
+
+def calculate_ratio(numerator, denominator):
+    """0으로 나누는 상황을 피하면서 비율 계산"""
+    if denominator <= 0:
+        return 0.0
+
+    return round(numerator / denominator, 4)
 
 def normalize_commit_summary_style(commit_summary):
     """LLM이 생성한 정중체 요약을 프로젝트 기준의 간결한 명사형/함체로 보정"""
@@ -3930,16 +3981,20 @@ def get_project_contributions(project_id):
 
         total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
         
-        # [데이터 1-1] 커밋별 백엔드 코드 점수 평균 계산
-        commit_backend_scores = [
-            commit.commit_backend_score
-            for commit in commits
-            if commit.commit_backend_score is not None
-        ]
-        backend_code_score = (
-            round(sum(commit_backend_scores) / len(commit_backend_scores), 2)
-            if commit_backend_scores
-            else None
+        # [데이터 1-1] 커밋별 백엔드 코드 점수 가중 집계 계산
+        backend_score_result = calculate_backend_code_score(commits)
+        backend_code_score = backend_score_result["backend_code_score"]
+        backend_score_method = backend_score_result["backend_score_method"]
+        backend_score_total_weight = backend_score_result["backend_score_total_weight"]
+
+        analysis_coverage_ratio = calculate_ratio(
+            analyzed_commit_count,
+            total_commit_count
+        )
+
+        score_coverage_ratio = calculate_ratio(
+            scored_commit_count,
+            total_commit_count
         )
         
         # [데이터 2] PR 내역 (제목, 본문, 댓글, 상태, 날짜)
@@ -3997,6 +4052,10 @@ def get_project_contributions(project_id):
             "3_static_code_analysis_data": {
                 "total_complexity_score": total_complexity,
                 "backend_code_score": backend_code_score,
+                "backend_score_method": backend_score_method,
+                "backend_score_total_weight": backend_score_total_weight,
+                "analysis_coverage_ratio": analysis_coverage_ratio,
+                "score_coverage_ratio": score_coverage_ratio,
                 "total_commit_count": total_commit_count,
                 "analyzed_commit_count": analyzed_commit_count,
                 "scored_commit_count": scored_commit_count,
