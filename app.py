@@ -78,14 +78,6 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
 
-# LLM API 호출용 설정
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
-
-# Gemini API 호출용 설정
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-
 # OpenAI API 호출용 설정
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
@@ -95,7 +87,6 @@ MAX_LLM_ANALYSIS_LIMIT = 20
 SCORE_REASON_MAX_CHARS = 90
 OPENAI_MAX_OUTPUT_TOKENS = 900
 OPENAI_CHUNK_MAX_OUTPUT_TOKENS = 650
-GEMINI_CHUNK_MAX_OUTPUT_TOKENS = 512
 
 # ==========================================
 # LLM 분석 비용/토큰 추정용 설정값
@@ -112,27 +103,14 @@ LARGE_DIFF_MAX_CHUNKS = 10
 LARGE_DIFF_MAX_TOTAL_CHARS_FOR_CHUNK_ANALYSIS = 60000
 MAX_LARGE_DIFF_ANALYSIS_LIMIT = 3
 
-# LLM 제공자/모델별 대략 단가(USD / 1M tokens)
-# OpenAI, Claude, Gemini 중 최종 모델은 샘플 테스트 후 결정
-# 실제 과금 전 각 제공자의 공식 가격표 기준으로 재확인 필요
+# OpenAI 모델별 대략 단가(USD / 1M tokens)
+# 실제 과금 전 OpenAI 공식 가격표 기준으로 재확인 필요
 LLM_PRICING_TABLE = {
-    "gemini_2_5_flash_lite": {
-        "provider": "Google",
-        "model": "gemini-2.5-flash-lite",
-        "input_per_1m": 0.10,
-        "output_per_1m": 0.40
-    },
     "gpt_5_mini": {
         "provider": "OpenAI",
         "model": "gpt-5-mini",
         "input_per_1m": 0.25,
         "output_per_1m": 2.00
-    },
-    "claude_haiku_4_5": {
-        "provider": "Anthropic",
-        "model": "claude-haiku-4-5",
-        "input_per_1m": 1.00,
-        "output_per_1m": 5.00
     }
 }
 
@@ -1480,7 +1458,7 @@ def infer_large_diff_topic(commit, changed_files):
     topic_rules = (
         (
             (
-                "llm", "openai", "gemini", "prompt",
+                "llm", "openai", "prompt",
                 "commit_summary", "commit_backend_score",
                 "analysis_status", "score_reason",
                 "analyze-static-code", "analysis-estimate",
@@ -1723,7 +1701,7 @@ def build_large_diff_chunk_based_analysis_result(commit, classification):
                 chunk,
                 chunk_plan
             )
-            chunk_result = call_llm_for_large_diff_chunk_analysis(chunk_input)
+            chunk_result = call_openai_for_large_diff_chunk_analysis(chunk_input)
 
             chunk_result["chunk_index"] = chunk["chunk_index"]
             chunk_result["filename"] = chunk["filename"]
@@ -2051,13 +2029,6 @@ OPENAI_LARGE_DIFF_CHUNK_RESPONSE_SCHEMA = {
     ]
 }
 
-def extract_text_from_gemini_response(response_json):
-    """Gemini 응답 JSON에서 모델이 생성한 텍스트 추출"""
-    try:
-        return response_json["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError, TypeError) as e:
-        raise ValueError("Gemini 응답에서 텍스트를 추출할 수 없습니다.") from e
-
 def extract_text_from_openai_response(response_json):
     """OpenAI Responses API 응답 JSON에서 모델이 생성한 텍스트 추출"""
     if not isinstance(response_json, dict):
@@ -2119,133 +2090,6 @@ def parse_llm_json_response(response_text):
         return json.loads(cleaned_text)
     except json.JSONDecodeError as e:
         raise ValueError("LLM 응답을 JSON으로 파싱할 수 없습니다.") from e
-
-
-def call_gemini_for_commit_analysis(commit_input):
-    """Gemini API를 호출하여 code_like 커밋의 분석 결과 JSON 생성"""
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.")
-
-    safe_commit_input = build_safe_commit_input_for_llm(commit_input)
-    user_prompt = build_commit_analysis_user_prompt(safe_commit_input)
-
-    payload = {
-        "systemInstruction": {
-            "parts": [
-                {
-                    "text": COMMIT_ANALYSIS_SYSTEM_PROMPT
-                }
-            ]
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": user_prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 512,
-            "responseMimeType": "application/json"
-        }
-    }
-
-    headers = {
-        "x-goog-api-key": GEMINI_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    try:
-        response = requests.post(
-            GEMINI_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        error_message = ""
-        if "response" in locals() and response is not None:
-            error_message = response.text[:500]
-        raise RuntimeError(f"Gemini API 호출에 실패했습니다. {error_message}") from e
-
-    response_json = response.json()
-    response_text = extract_text_from_gemini_response(response_json)
-    parsed_result = parse_llm_json_response(response_text)
-
-    try:
-        return validate_commit_analysis_result(
-            parsed_result,
-            expected_type=safe_commit_input.get("estimated_type")
-        )
-    except ValueError as e:
-        raw_result_preview = json.dumps(parsed_result, ensure_ascii=False)[:500]
-        raise ValueError(f"{str(e)} / raw_result={raw_result_preview}") from e
-
-def call_gemini_for_large_diff_chunk_analysis(chunk_input):
-    """Gemini API를 호출하여 large_diff chunk 분석 결과 JSON 생성"""
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.")
-
-    user_prompt = build_large_diff_chunk_analysis_user_prompt(chunk_input)
-
-    payload = {
-        "systemInstruction": {
-            "parts": [
-                {
-                    "text": LARGE_DIFF_CHUNK_ANALYSIS_SYSTEM_PROMPT
-                }
-            ]
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": user_prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": GEMINI_CHUNK_MAX_OUTPUT_TOKENS,
-            "responseMimeType": "application/json"
-        }
-    }
-
-    headers = {
-        "x-goog-api-key": GEMINI_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    try:
-        response = requests.post(
-            GEMINI_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        error_message = ""
-        if "response" in locals() and response is not None:
-            error_message = response.text[:500]
-        raise RuntimeError(f"Gemini large_diff chunk API 호출에 실패했습니다. {error_message}") from e
-
-    response_json = response.json()
-    response_text = extract_text_from_gemini_response(response_json)
-    parsed_result = parse_llm_json_response(response_text)
-
-    try:
-        return validate_large_diff_chunk_analysis_result(parsed_result)
-    except ValueError as e:
-        raw_result_preview = json.dumps(parsed_result, ensure_ascii=False)[:500]
-        raise ValueError(f"{str(e)} / raw_chunk_result={raw_result_preview}") from e
 
 def call_openai_for_commit_analysis(commit_input):
     """OpenAI API를 호출하여 code_like 커밋의 분석 결과 JSON 생성"""
@@ -2360,26 +2204,6 @@ def call_openai_for_large_diff_chunk_analysis(chunk_input):
     except ValueError as e:
         raw_result_preview = json.dumps(parsed_result, ensure_ascii=False)[:500]
         raise ValueError(f"{str(e)} / raw_chunk_result={raw_result_preview}") from e
-
-def call_llm_for_commit_analysis(commit_input):
-    """설정된 LLM provider에 따라 커밋 분석 API 호출"""
-    if LLM_PROVIDER == "openai":
-        return call_openai_for_commit_analysis(commit_input)
-
-    if LLM_PROVIDER == "gemini":
-        return call_gemini_for_commit_analysis(commit_input)
-
-    raise RuntimeError(f"지원하지 않는 LLM_PROVIDER 값입니다: {LLM_PROVIDER}")
-
-def call_llm_for_large_diff_chunk_analysis(chunk_input):
-    """설정된 LLM provider에 따라 large_diff chunk 분석 API 호출"""
-    if LLM_PROVIDER == "openai":
-        return call_openai_for_large_diff_chunk_analysis(chunk_input)
-
-    if LLM_PROVIDER == "gemini":
-        return call_gemini_for_large_diff_chunk_analysis(chunk_input)
-
-    raise RuntimeError(f"지원하지 않는 LLM_PROVIDER 값입니다: {LLM_PROVIDER}")
 
 def extract_raw_result_from_error(error_message):
     """LLM 검증 실패 메시지에 포함된 raw_result JSON을 가능한 범위에서 추출"""
@@ -3189,8 +3013,6 @@ def get_analysis_estimate(project_id):
 def analyze_static_code(project_id):
     """
     저장된 커밋 Diff를 기준으로 정적 코드 분석 결과를 CommitDetail에 반영하는 API
-    use_llm=false: 정책 기반으로 처리 가능한 커밋만 저장
-    use_llm=true: code_like 커밋도 Gemini API로 분석하되, smoke test 단계에서는 limit 필수
     """
     project = Project.query.get(project_id)
     if not project:
@@ -3341,7 +3163,7 @@ def analyze_static_code(project_id):
         
         analysis_result = build_policy_based_analysis_result(commit, classification)
 
-        # code_like는 정책 기반 결과가 없으므로, use_llm=true일 때만 Gemini로 분석
+        # code_like는 정책 기반 결과가 없으므로, use_llm=true일 때만 OpenAI로 분석
         if analysis_result is None:
             if not use_llm:
                 code_like_pending_count += 1
@@ -3355,7 +3177,7 @@ def analyze_static_code(project_id):
 
             try:
                 commit_input = build_commit_input(commit)
-                llm_result = call_llm_for_commit_analysis(commit_input)
+                llm_result = call_openai_for_commit_analysis(commit_input)
                 save_commit_analysis_result(commit, llm_result, expected_type=estimated_type)
 
                 llm_processed_count += 1
