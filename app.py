@@ -78,6 +78,9 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
 
+# GitHub 데이터 수집 성능 설정
+ENABLE_LIZARD_ANALYSIS = os.getenv("ENABLE_LIZARD_ANALYSIS", "false").lower() == "true"
+
 # OpenAI API 호출용 설정
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
@@ -1360,7 +1363,8 @@ Diff and truncation rules:
 Complexity rules:
 
 - Do not calculate cyclomatic complexity yourself.
-- complexity_score is already calculated by Lizard and is only a reference value.
+- complexity_score may be null. If present, it is a Lizard-calculated reference value only.
+- Do not penalize a commit merely because complexity_score is null.
 - Do not use complexity_score as the sole reason for scoring.
 - Interpret complexity_score together with the visible diff, LOC, changed_files, and estimated_type.
 - If complexity_score seems high but the visible diff does not explain why, mention uncertainty briefly or avoid over-penalizing.
@@ -2920,12 +2924,40 @@ def collect_project_data_task(self, project_id):
     if not project:
         return {"error": "해당 프로젝트를 찾을 수 없습니다."}
 
-    g = Github(GITHUB_TOKEN)
+    g = Github(GITHUB_TOKEN, per_page=100)
     
     try:
         repo = g.get_repo(project.name)
         contributors = repo.get_contributors()
         
+        # 기존 수집 데이터 사전 로드: 루프 안 DB 조회와 불필요한 GitHub 상세 API 호출 방지
+        existing_commit_map = {
+            row.commit_hash: (row.loc_added or 0, row.loc_deleted or 0)
+            for row in CommitDetail.query
+                .with_entities(
+                    CommitDetail.commit_hash,
+                    CommitDetail.loc_added,
+                    CommitDetail.loc_deleted
+                )
+                .all()
+        }
+
+        existing_pr_numbers = {
+            row.pr_number
+            for row in PullRequestDetail.query
+                .filter_by(project_id=project.id)
+                .with_entities(PullRequestDetail.pr_number)
+                .all()
+        }
+
+        existing_issue_numbers = {
+            row.issue_number
+            for row in IssueDetail.query
+                .filter_by(project_id=project.id)
+                .with_entities(IssueDetail.issue_number)
+                .all()
+        }
+
         collected_count = 0
         
         # 기여자별 데이터 수집 및 DB 저장
@@ -2949,68 +2981,90 @@ def collect_project_data_task(self, project_id):
             total_loc_deleted = 0  # 유저의 총 삭제 라인 누적 변수
             
             for c in commits:
-                # (NEW) 부모 커밋이 2개 이상인 경우 = 남이 누른 '머지 커밋'이므로 도둑질 방지를 위해 무시
+                # 부모 커밋이 2개 이상인 경우 = 머지 커밋이므로 무시
                 if len(c.parents) > 1:
                     continue
+
+                # 이미 저장된 커밋은 DB 값으로 통계만 누적하고,
+                # c.stats / c.files / get_contents 같은 GitHub 상세 API 호출은 피한다.
+                if c.sha in existing_commit_map:
+                    existing_loc_added, existing_loc_deleted = existing_commit_map[c.sha]
+                    commit_count += 1
+                    total_loc_added += existing_loc_added
+                    total_loc_deleted += existing_loc_deleted
+
+                    if commit_count % 100 == 0:
+                        enforce_rate_limit(g)
+
+                    continue
+
                 commit_count += 1
-                
-                # [API 한도확인 1] 커밋 100개를 처리할 때마다 API 한도를 확인합니다.
+
+                # API 호출 한도 확인
                 if commit_count % 100 == 0:
                     enforce_rate_limit(g)
-                
-                # DB 중복 검사 전에 깃허브에서 라인 수부터 무조건 가져와서 누적하기!
+
+                # 새 커밋만 GitHub 상세 정보 접근
                 additions = c.stats.additions if c.stats else 0
                 deletions = c.stats.deletions if c.stats else 0
-                
+
                 total_loc_added += additions
                 total_loc_deleted += deletions
+
+
+                # 다국어 파일 필터링 및 Lizard 복잡도 계산
+                total_complexity = 0 if ENABLE_LIZARD_ANALYSIS else None
+
+                # Diff 텍스트를 모을 리스트
+                diff_texts_list = []
                 
-                # 중복 방지: 이미 DB에 저장된 커밋인지 해시값(sha)으로 확인
-                existing_commit = CommitDetail.query.filter_by(commit_hash=c.sha).first()
-                
-                if not existing_commit:
-                    # 다국어 파일 필터링 및 Lizard 복잡도 계산
-                    total_complexity = 0
+                for file in c.files:
+                    # Diff 텍스트 수집: patch(diff) 데이터가 존재한다면 리스트에 담기
+                    if file.patch: 
+                        diff_texts_list.append(f"--- {file.filename} ---\n{file.patch}")
+                        
+                    # Lizard 복잡도 분석은 수집 속도 비용이 크므로 옵션이 켜진 경우에만 수행
+                    if (
+                        ENABLE_LIZARD_ANALYSIS
+                        and not file.filename.lower().endswith(LIZARD_IGNORE_EXTENSIONS)
+                        and file.status != 'removed'
+                    ):
+                        try:
+                            file_content = repo.get_contents(
+                                file.filename,
+                                ref=c.sha
+                            ).decoded_content.decode('utf-8')
 
-                    # Diff 텍스트를 모을 리스트
-                    diff_texts_list = []
-                    
-                    for file in c.files:
-                        # Diff 텍스트 수집: patch(diff) 데이터가 존재한다면 리스트에 담기
-                        if file.patch: 
-                            diff_texts_list.append(f"--- {file.filename} ---\n{file.patch}")
-                            
-                        # 1. 무시할 확장자가 아니고, 삭제된 파일이 아닌 경우에만 진행
-                        if not file.filename.lower().endswith(LIZARD_IGNORE_EXTENSIONS) and file.status != 'removed':
-                            try:
-                                # 2. 깃허브 API를 찔러서 해당 시점(c.sha)의 파일 원본 코드를 가져옴
-                                file_content = repo.get_contents(file.filename, ref=c.sha).decoded_content.decode('utf-8')
-                                
-                                # 3. Lizard에 코드 원본을 통과시켜서 분석 결과 추출
-                                analysis = lizard.analyze_file.analyze_source_code(file.filename, file_content)
-                                
-                                # 4. 파일 내 모든 함수/메서드의 사이클로매틱 복잡도 점수 합산
-                                file_complexity = sum([func.cyclomatic_complexity for func in analysis.function_list])
-                                total_complexity += file_complexity
-                            except Exception as e:
-                                # 코드가 깨져있거나(바이너리 파일 등) 파싱에 실패하면 무시하고 다음 파일로 넘어감
-                                print(f"[경고] Lizard 분석 실패: {file.filename} / {e}")
+                            analysis = lizard.analyze_file.analyze_source_code(
+                                file.filename,
+                                file_content
+                            )
 
-                    # 모은 Diff 텍스트들을 하나의 텍스트로 합침
-                    final_diff_text = "\n\n".join(diff_texts_list)
+                            file_complexity = sum([
+                                func.cyclomatic_complexity
+                                for func in analysis.function_list
+                            ])
+                            total_complexity += file_complexity
 
-                    new_commit = CommitDetail(
-                        user_id=user.id,
-                        project_id=project.id,
-                        commit_hash=c.sha,
-                        message=c.commit.message,
-                        loc_added=additions,
-                        loc_deleted=deletions,
-                        complexity_score=total_complexity,
-                        diff_text=final_diff_text,
-                        committed_at=c.commit.author.date
-                    )
-                    db.session.add(new_commit)
+                        except Exception as e:
+                            print(f"[경고] Lizard 분석 실패: {file.filename} / {e}")
+
+                # 모은 Diff 텍스트들을 하나의 텍스트로 합침
+                final_diff_text = "\n\n".join(diff_texts_list)
+
+                new_commit = CommitDetail(
+                    user_id=user.id,
+                    project_id=project.id,
+                    commit_hash=c.sha,
+                    message=c.commit.message,
+                    loc_added=additions,
+                    loc_deleted=deletions,
+                    complexity_score=total_complexity,
+                    diff_text=final_diff_text,
+                    committed_at=c.commit.author.date
+                )
+                db.session.add(new_commit)
+                existing_commit_map[c.sha] = (additions, deletions)
             
             # ==========================================
             # 3. PR 텍스트 + 댓글/리뷰 코멘트 수집
@@ -3024,50 +3078,52 @@ def collect_project_data_task(self, project_id):
             
             for pr in prs:
                 pr_count += 1
-                # 중복 방지 (pr_number와 project_id로 확인)
-                existing_pr = PullRequestDetail.query.filter_by(pr_number=pr.number, project_id=project.id).first()
-                
-                if not existing_pr:
-                    # [댓글 수집 로직]
-                    comments_list = []
-                    merger_login = None  # (NEW) 머지 수행자 초기화
-                    
-                    try:
-                        # 1. 일반 PR 댓글
-                        for comment in pr.get_comments():
-                            comments_list.append(f"[{comment.user.login}]: {comment.body}")
-                            
-                        # 2. 코드 라인에 남긴 진짜 '코드 리뷰' 댓글
-                        pr_obj = repo.get_pull(pr.number)
-                        for rev_comment in pr_obj.get_review_comments():
-                            comments_list.append(f"[Code Review - {rev_comment.user.login}]: {rev_comment.body}")
-                            
-                        # 3. Approve/거절 시 남긴 '리뷰 총평' 댓글 가져오기
-                        for review in pr_obj.get_reviews():
-                            if review.body:  # 내용이 비어있지 않은 경우에만 추가
-                                comments_list.append(f"[Review({review.state}) - {review.user.login}]: {review.body}")
-                            
-                        # 4. 머지 여부 확인 및 머지한 사람 찾기
-                        if pr_obj.merged and pr_obj.merged_by:
-                            merger_login = pr_obj.merged_by.login
-                            
-                    except Exception as e:
-                        print(f"[경고] PR #{pr.number} 댓글/리뷰 수집 실패: {e}")
-                        
-                    comments_text = "\n".join(comments_list) # 댓글들을 엔터 단위로 하나의 문자열로 합침
 
-                    new_pr = PullRequestDetail(
-                        user_id=user.id,
-                        project_id=project.id,
-                        pr_number=pr.number,
-                        title=pr.title,
-                        body=pr.body if pr.body else "",
-                        comments=comments_text,
-                        state=pr.state,
-                        created_at=pr.created_at,
-                        merged_by=merger_login  # (NEW) DB에 머지한 사람 저장
-                    )
-                    db.session.add(new_pr)
+                # 이미 저장된 PR은 DB 조회 없이 바로 건너뜀
+                if pr.number in existing_pr_numbers:
+                    continue
+                
+                # [댓글 수집 로직]
+                comments_list = []
+                merger_login = None
+                    
+                try:
+                    # 1. 일반 PR 댓글
+                    for comment in pr.get_comments():
+                        comments_list.append(f"[{comment.user.login}]: {comment.body}")
+                        
+                    # 2. 코드 라인에 남긴 진짜 '코드 리뷰' 댓글
+                    pr_obj = repo.get_pull(pr.number)
+                    for rev_comment in pr_obj.get_review_comments():
+                        comments_list.append(f"[Code Review - {rev_comment.user.login}]: {rev_comment.body}")
+                        
+                    # 3. Approve/거절 시 남긴 '리뷰 총평' 댓글 가져오기
+                    for review in pr_obj.get_reviews():
+                        if review.body:  # 내용이 비어있지 않은 경우에만 추가
+                            comments_list.append(f"[Review({review.state}) - {review.user.login}]: {review.body}")
+                        
+                    # 4. 머지 여부 확인 및 머지한 사람 찾기
+                    if pr_obj.merged and pr_obj.merged_by:
+                        merger_login = pr_obj.merged_by.login
+                        
+                except Exception as e:
+                    print(f"[경고] PR #{pr.number} 댓글/리뷰 수집 실패: {e}")
+                    
+                comments_text = "\n".join(comments_list) # 댓글들을 엔터 단위로 하나의 문자열로 합침
+
+                new_pr = PullRequestDetail(
+                    user_id=user.id,
+                    project_id=project.id,
+                    pr_number=pr.number,
+                    title=pr.title,
+                    body=pr.body if pr.body else "",
+                    comments=comments_text,
+                    state=pr.state,
+                    created_at=pr.created_at,
+                    merged_by=merger_login  # (NEW) DB에 머지한 사람 저장
+                )
+                db.session.add(new_pr)
+                existing_pr_numbers.add(pr.number)
 
             # ==========================================
             # 4. 이슈 상세 텍스트 수집
@@ -3081,31 +3137,33 @@ def collect_project_data_task(self, project_id):
             
             for issue in issues:
                 issue_count += 1
-                # 중복 방지 (issue_number와 project_id로 확인)
-                existing_issue = IssueDetail.query.filter_by(issue_number=issue.number, project_id=project.id).first()
-                
-                if not existing_issue:
-                    # [댓글 수집 로직]
-                    comments_list = []
-                    try:
-                        for comment in issue.get_comments():
-                            comments_list.append(f"[{comment.user.login}]: {comment.body}")
-                    except Exception as e:
-                        print(f"[경고] Issue #{issue.number} 댓글 수집 실패: {e}")
-                        
-                    comments_text = "\n".join(comments_list)
 
-                    new_issue = IssueDetail(
-                        user_id=user.id,
-                        project_id=project.id,
-                        issue_number=issue.number,
-                        title=issue.title,
-                        body=issue.body if issue.body else "", 
-                        comments=comments_text,
-                        state=issue.state,
-                        created_at=issue.created_at
-                    )
-                    db.session.add(new_issue)
+                # 이미 저장된 Issue는 DB 조회 없이 바로 건너뜀
+                if issue.number in existing_issue_numbers:
+                    continue
+                
+                # [댓글 수집 로직]
+                comments_list = []
+                try:
+                    for comment in issue.get_comments():
+                        comments_list.append(f"[{comment.user.login}]: {comment.body}")
+                except Exception as e:
+                    print(f"[경고] Issue #{issue.number} 댓글 수집 실패: {e}")
+                    
+                comments_text = "\n".join(comments_list)
+
+                new_issue = IssueDetail(
+                    user_id=user.id,
+                    project_id=project.id,
+                    issue_number=issue.number,
+                    title=issue.title,
+                    body=issue.body if issue.body else "", 
+                    comments=comments_text,
+                    state=issue.state,
+                    created_at=issue.created_at
+                )
+                db.session.add(new_issue)
+                existing_issue_numbers.add(issue.number)
             
             # 5. 통계 데이터(ContributionData) 업데이트 로직 
             review_query = f"repo:{project.name} type:pr reviewed-by:{github_id}"
