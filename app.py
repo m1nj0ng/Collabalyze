@@ -3979,8 +3979,6 @@ def get_project_contributions(project_id):
         )
         analyzed_commit_count = total_commit_count - pending_analysis_count
 
-        total_complexity = sum([commit.complexity_score for commit in commits if commit.complexity_score is not None])
-        
         # [데이터 1-1] 커밋별 백엔드 코드 점수 가중 집계 계산
         backend_score_result = calculate_backend_code_score(commits)
         backend_code_score = backend_score_result["backend_code_score"]
@@ -4050,10 +4048,8 @@ def get_project_contributions(project_id):
             },
 
             "3_static_code_analysis_data": {
-                "total_complexity_score": total_complexity,
                 "backend_code_score": backend_code_score,
                 "backend_score_method": backend_score_method,
-                "backend_score_total_weight": backend_score_total_weight,
                 "analysis_coverage_ratio": analysis_coverage_ratio,
                 "score_coverage_ratio": score_coverage_ratio,
                 "total_commit_count": total_commit_count,
