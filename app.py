@@ -1405,17 +1405,27 @@ Total: 100 points.
 - Do not directly compute complexity.
 
 Scoring guidance:
-- 90-100: Excellent, focused, robust, maintainable change with clear handling of edge cases.
-- 80-89: Good change with minor maintainability or robustness concerns.
-- 70-79: Acceptable but with noticeable issues such as broad exception handling, unclear structure, or limited edge-case handling.
-- 60-69: Weak implementation with meaningful concerns, but still partially functional.
-- 40-59: Significant quality issues, fragile logic, poor structure, or risky behavior.
-- 0-39: Very poor or unsafe code change, clearly broken or largely unsuitable.
-- Do not assign 80+ merely because an API endpoint or feature was added; scores above 80 require visible evidence of coherent structure, basic edge-case handling, and maintainability.
-- Do not default to 85 for generally good-looking commits.
-- If timeout handling, pagination, JSON parsing safety, null handling, or error observability is not visible, prefer a score below 85 even when the feature works.
-- Pure rename, API naming cleanup, compatibility wrapper, or small refactor-only commits should not receive 90+ unless they clearly improve behavior, reliability, architecture, or maintainability beyond naming consistency.
-- For small rename/refactor-only commits with tests, prefer 75-84.
+
+Treat 75 as the baseline. A commit that correctly implements its stated purpose and has basic readable structure with no visible major problems should receive around 75. Do not treat "looks clean" or "appears to work" as a reason to score above 75.
+
+Score ABOVE 75 only when you can identify specific visible quality signals in the diff:
+- 76-79: At least one concrete positive signal, such as a null check, explicit error handling, clear naming, useful separation, or reduced duplication.
+- 80-84: Multiple positive signals, including at least one visible robustness, validation, edge-case handling, or maintainability improvement.
+- 85-89: Strong visible evidence of structure, error safety, and maintainability. All three should be supported by the visible diff.
+- 90-100: Rare. Use only when the commit is exceptional across the main rubric dimensions, with concrete evidence for correctness, structure, robustness, maintainability, and appropriate scope.
+
+Score BELOW 75 when you can identify specific visible quality concerns:
+- 65-74: One or more clear concerns, such as missing handling for a realistic failure, fragile logic, unclear structure, excessive responsibility, or limited maintainability.
+- 40-64: Significant problems, such as fragile logic, poor structure, missing error handling in risky code paths, or changes likely to break existing behavior.
+- 0-39: Very poor, unsafe, or largely unsuitable implementation.
+
+Hard caps:
+- If the diff performs external API, network, database, file parsing, or JSON parsing operations and no null/None/error handling is visible, the score must be 78 or below.
+- If the diff changes code that can fail at runtime but hides failures with broad exception handling, bare except, or except: pass, the score must be 78 or below unless the diff also adds clear observability or recovery.
+- A score of 85+ requires at least two concrete visible quality signals in the diff. Mention the strongest one concisely in score_reason.
+- A commit that only adds a field, extends an API response, renames something, changes a constant, or wraps an existing call should usually stay in 70-80 unless it clearly improves reliability, architecture, or maintainability.
+- Large initial implementation commits should not automatically receive high scores. If they mix setup, resources, UI, configuration, and logic, prefer 75-84 unless robustness and structure are clearly visible.
+- Broad changes with many responsibilities should be penalized for change-scope risk even if the implementation is mostly coherent.
 
 Important:
 - Do not reward large LOC by itself.
@@ -1481,12 +1491,27 @@ Rules:
 - Mention the main reason for the score or why the chunk is not scoreable.
 
 Scoring guidance:
-- 90-100: Excellent, robust, focused, maintainable chunk.
-- 80-89: Good chunk with minor concerns.
-- 70-79: Acceptable chunk with noticeable maintainability or edge-case concerns.
-- 60-69: Weak or fragile implementation.
-- 40-59: Significant quality issues.
+
+Treat 75 as the baseline. A chunk that correctly implements its visible change with basic readable structure and no visible major problems should receive around 75. Do not treat "looks clean" or "appears to work" as a reason to score above 75.
+
+Score ABOVE 75 only when you can identify specific visible quality signals in this chunk:
+- 76-79: At least one concrete positive signal visible in this chunk.
+- 80-84: Multiple positive signals, including at least one visible robustness, validation, edge-case handling, or maintainability improvement in this chunk.
+- 85-89: Strong visible evidence of structure, safety, and maintainability in this chunk.
+- 90-100: Rare. Use only when this chunk is exceptional across the relevant dimensions with concrete evidence visible in this chunk.
+
+Score BELOW 75 when you can identify specific visible quality concerns in this chunk:
+- 65-74: One or more visible concerns, such as fragile logic, unclear structure, duplicated responsibility, or limited maintainability.
+- 40-64: Significant problems, such as poor structure, risky behavior, or fragile implementation.
 - 0-39: Very poor or unsafe implementation.
+
+Important chunk-specific calibration:
+- A chunk is only one part of a larger commit. Do not penalize a chunk for missing error handling, tests, setup, or context that may exist in other chunks.
+- Evaluate only what is visible in this chunk.
+- If this chunk mixes setup, resources, configuration, UI, and logic without clear separation, prefer 75-84.
+- If this chunk is mostly resources, configuration, generated-looking code, static assets, vector drawables, metadata, or project setup with no maintainable implementation logic, set has_scoreable_code to false and chunk_score to null.
+- If has_scoreable_code is false, chunk_score must be null.
+- If chunk_score is a number, has_scoreable_code must be true.
 
 Important:
 - Do not judge unseen chunks.
