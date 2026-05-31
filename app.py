@@ -151,7 +151,14 @@ DOC_OR_CONFIG_FILENAMES = (
     'SECURITY',
     'requirements.txt',
     'requirements-dev.txt',
-    '.gitignore'
+    '.gitignore',
+    '.classpath',
+    '.project',
+    '.factorypath',
+    'pom.xml',
+    'build.gradle',
+    'settings.gradle',
+    'gradle.properties'
 )
 
 DOC_OR_CONFIG_BASENAME_PREFIXES = (
@@ -1176,6 +1183,7 @@ You are a static code quality analysis assistant for the Collabalyze project.
 The score is produced by the backend analysis pipeline, but the evaluation target is actual source-code quality.
 Evaluate source-code changes across backend, frontend, mobile, client-side, or other implementation code when the visible diff contains real logic or maintainable source changes.
 Do not skip a commit merely because it changes frontend, Android, mobile, UI, or client-side source code.
+JSP, HTML templates, CSS, JavaScript, React/Vue components, UI layouts, and client-side templates are source-code implementation changes when they affect structure, rendering, interaction, or maintainability. Do not mark them as skipped merely because they are frontend or template files.
 
 Your task is to analyze exactly one Git commit and return a strict JSON object with four fields:
 commit_summary, commit_backend_score, analysis_status, score_reason.
