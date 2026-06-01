@@ -11,7 +11,7 @@ import lizard
 import time
 import math
 import json
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, unquote
 from collections import defaultdict
 from sqlalchemy.orm import joinedload
 
@@ -77,6 +77,10 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
+
+# GitHub 프로젝트/조직 주소 기반 리포지토리 목록 조회용 설정
+GITHUB_API_BASE_URL = "https://api.github.com"
+GITHUB_OWNER_REPO_LIST_LIMIT = 50
 
 # GitHub 데이터 수집 성능 설정
 ENABLE_LIZARD_ANALYSIS = os.getenv("ENABLE_LIZARD_ANALYSIS", "false").lower() == "true"
@@ -2871,6 +2875,267 @@ def get_user_repos(user_id):
         "status": "success",
         "total_count": len(repo_list),
         "repos": repo_list
+    })
+
+# ==========================================
+# 3.6. GitHub 프로젝트/조직 주소 기반 Repository 목록 조회 API
+# ==========================================
+
+def build_github_api_headers():
+    """GitHub API 호출용 기본 헤더 생성"""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+
+    return headers
+
+
+def parse_github_owner_input(raw_value):
+    """
+    GitHub owner/org 주소 또는 repo 주소를 owner와 선택 repo로 분리한다.
+
+    지원 예시:
+    - https://github.com/softeer5th
+    - https://github.com/softeer5th/Team2-Getit
+    - https://github.com/orgs/softeer5th/repositories
+    - softeer5th
+    - softeer5th/Team2-Getit
+    """
+    if raw_value is None:
+        raise ValueError("GitHub 프로젝트 또는 리포지토리 주소가 필요합니다.")
+
+    raw_text = str(raw_value).strip()
+
+    if not raw_text:
+        raise ValueError("GitHub 프로젝트 또는 리포지토리 주소가 필요합니다.")
+
+    raw_text = raw_text.replace(".git", "").strip()
+
+    if raw_text.startswith("github.com/"):
+        raw_text = f"https://{raw_text}"
+
+    if raw_text.startswith("http://") or raw_text.startswith("https://"):
+        parsed = urlparse(raw_text)
+
+        if parsed.netloc.lower() not in ("github.com", "www.github.com"):
+            raise ValueError("GitHub 주소만 입력할 수 있습니다.")
+
+        path_text = parsed.path
+    else:
+        path_text = raw_text
+
+    path_text = unquote(path_text).strip().strip("/")
+    path_parts = [part for part in path_text.split("/") if part]
+
+    if not path_parts:
+        raise ValueError("GitHub owner 또는 repository 정보를 찾을 수 없습니다.")
+
+    # GitHub 조직 탭 URL 예: https://github.com/orgs/softeer5th/repositories
+    if path_parts[0] == "orgs":
+        if len(path_parts) < 2:
+            raise ValueError("GitHub 조직명을 찾을 수 없습니다.")
+
+        owner = path_parts[1].strip()
+        selected_repo_name = None
+        input_type = "owner"
+
+    else:
+        owner = path_parts[0].strip()
+        selected_repo_name = path_parts[1].strip() if len(path_parts) >= 2 else None
+        input_type = "repo" if selected_repo_name else "owner"
+
+    if not owner or " " in owner:
+        raise ValueError("GitHub owner 형식이 올바르지 않습니다.")
+
+    if selected_repo_name and " " in selected_repo_name:
+        raise ValueError("GitHub repository 형식이 올바르지 않습니다.")
+
+    return {
+        "owner": owner,
+        "selected_repo_name": selected_repo_name,
+        "input_type": input_type
+    }
+
+
+def build_repo_list_item(repo_data, selected_repo_name=None):
+    """GitHub repository 응답을 프론트에서 쓰기 쉬운 형태로 정리"""
+    repo_name = repo_data.get("name")
+    selected = bool(
+        selected_repo_name
+        and repo_name
+        and repo_name.lower() == selected_repo_name.lower()
+    )
+
+    return {
+        "name": repo_data.get("full_name"),
+        "repo_name": repo_name,
+        "url": repo_data.get("html_url"),
+        "description": repo_data.get("description"),
+        "selected": selected
+    }
+
+
+def github_error_response(response, default_message):
+    """GitHub API 실패 응답을 프론트에 전달하기 쉬운 형태로 정리"""
+    try:
+        error_body = response.json()
+    except Exception:
+        error_body = {}
+
+    status_code = response.status_code
+
+    if response.headers.get("X-RateLimit-Remaining") == "0":
+        status_code = 429
+
+    return jsonify({
+        "status": "error",
+        "error": default_message,
+        "github_status_code": response.status_code,
+        "github_message": error_body.get("message")
+    }), status_code
+
+
+@app.route('/api/github/owner-repos', methods=['POST'])
+def get_github_owner_repos():
+    """
+    GitHub owner/organization 주소를 입력받아 public repository 목록을 반환한다.
+    repo 주소가 입력된 경우에는 같은 owner의 repo 목록을 반환하되, 해당 repo를 selected=true로 표시한다.
+    """
+    data = request.get_json(silent=True) or {}
+
+    raw_input = (
+        data.get("owner_url")
+        or data.get("project_url")
+        or data.get("repo_url")
+        or data.get("url")
+        or data.get("owner")
+    )
+
+    try:
+        parsed_input = parse_github_owner_input(raw_input)
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 400
+
+    owner = parsed_input["owner"]
+    selected_repo_name = parsed_input["selected_repo_name"]
+    input_type = parsed_input["input_type"]
+
+    try:
+        requested_limit = int(data.get("limit", GITHUB_OWNER_REPO_LIST_LIMIT))
+    except (TypeError, ValueError):
+        requested_limit = GITHUB_OWNER_REPO_LIST_LIMIT
+
+    limit = min(max(requested_limit, 1), GITHUB_OWNER_REPO_LIST_LIMIT)
+
+    headers = build_github_api_headers()
+
+    owner_response = requests.get(
+        f"{GITHUB_API_BASE_URL}/users/{owner}",
+        headers=headers,
+        timeout=10
+    )
+
+    if owner_response.status_code != 200:
+        return github_error_response(owner_response, "GitHub owner 조회에 실패했습니다.")
+
+    owner_info = owner_response.json()
+    owner_type = owner_info.get("type")
+    total_count = owner_info.get("public_repos", 0)
+
+    if owner_type == "Organization":
+        repos_api_url = f"{GITHUB_API_BASE_URL}/orgs/{owner}/repos"
+        repo_params = {
+            "type": "public",
+            "sort": "updated",
+            "direction": "desc",
+            "per_page": limit,
+            "page": 1
+        }
+    else:
+        repos_api_url = f"{GITHUB_API_BASE_URL}/users/{owner}/repos"
+        repo_params = {
+            "sort": "updated",
+            "direction": "desc",
+            "per_page": limit,
+            "page": 1
+        }
+
+    repos_response = requests.get(
+        repos_api_url,
+        headers=headers,
+        params=repo_params,
+        timeout=10
+    )
+
+    if repos_response.status_code != 200:
+        return github_error_response(repos_response, "GitHub repository 목록 조회에 실패했습니다.")
+
+    repo_items = [
+        build_repo_list_item(repo, selected_repo_name=selected_repo_name)
+        for repo in repos_response.json()
+    ]
+
+    selected_repo_url = None
+
+    if selected_repo_name:
+        selected_full_name = f"{owner}/{selected_repo_name}".lower()
+        selected_repo_found = False
+
+        for repo_item in repo_items:
+            if (repo_item.get("name") or "").lower() == selected_full_name:
+                repo_item["selected"] = True
+                selected_repo_url = repo_item.get("url")
+                selected_repo_found = True
+                break
+
+        # repo URL을 직접 입력했는데 limit 범위 안에 없으면, 해당 repo를 별도로 조회해서 목록에 포함
+        if not selected_repo_found:
+            selected_repo_response = requests.get(
+                f"{GITHUB_API_BASE_URL}/repos/{owner}/{selected_repo_name}",
+                headers=headers,
+                timeout=10
+            )
+
+            if selected_repo_response.status_code != 200:
+                return github_error_response(
+                    selected_repo_response,
+                    "입력한 GitHub repository를 찾을 수 없거나 접근할 수 없습니다."
+                )
+
+            selected_repo_item = build_repo_list_item(
+                selected_repo_response.json(),
+                selected_repo_name=selected_repo_name
+            )
+            selected_repo_item["selected"] = True
+            selected_repo_url = selected_repo_item.get("url")
+
+            # 선택 repo를 맨 위에 두고, 최대 limit 개수는 유지
+            repo_items = [selected_repo_item] + repo_items
+            repo_items = repo_items[:limit]
+
+        # selected repo가 화면에서 바로 보이도록 맨 위로 정렬
+        repo_items.sort(key=lambda item: not item.get("selected", False))
+
+    return jsonify({
+        "status": "success",
+        "input_type": input_type,
+        "owner": owner,
+        "owner_type": owner_type,
+        "owner_url": f"https://github.com/{owner}",
+        "selected_repo_name": selected_repo_name,
+        "selected_repo_url": selected_repo_url,
+        "limit": limit,
+        "total_count": total_count,
+        "returned_count": len(repo_items),
+        "truncated": total_count > len(repo_items),
+        "repos": repo_items
     })
 
 # ==========================================
