@@ -78,6 +78,9 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 # GitHub API 데이터 수집용 토큰
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") 
 
+
+GITHUB_RATE_LIMIT_BUFFER = int(os.getenv("GITHUB_RATE_LIMIT_BUFFER", "10"))
+
 # GitHub 프로젝트/조직 주소 기반 리포지토리 목록 조회용 설정
 GITHUB_API_BASE_URL = "https://api.github.com"
 GITHUB_OWNER_REPO_LIST_LIMIT = 50
@@ -3185,7 +3188,7 @@ def enforce_rate_limit(g):
     # g.get_rate_limit().core 대신, 마지막 API 호출 헤더에 남은 잔여량을 직접 가져옴
     remaining, limit = g.rate_limiting
     
-    if remaining < 50:
+    if remaining <= GITHUB_RATE_LIMIT_BUFFER:
         # g.rate_limiting_resettime은 리셋 시간을 초(timestamp) 단위로 바로 뱉어줌
         reset_timestamp = g.rate_limiting_resettime
         current_timestamp = time.time()
@@ -3218,6 +3221,7 @@ def collect_project_data_task(self, project_id):
         existing_commit_map = {
             row.commit_hash: (row.loc_added or 0, row.loc_deleted or 0)
             for row in CommitDetail.query
+                .filter_by(project_id=project.id)
                 .with_entities(
                     CommitDetail.commit_hash,
                     CommitDetail.loc_added,
