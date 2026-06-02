@@ -3221,6 +3221,7 @@ def collect_project_data_task(self, project_id):
         existing_commit_map = {
             row.commit_hash: (row.loc_added or 0, row.loc_deleted or 0)
             for row in CommitDetail.query
+                .filter_by(project_id=project.id)
                 .with_entities(
                     CommitDetail.commit_hash,
                     CommitDetail.loc_added,
