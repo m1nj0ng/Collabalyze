@@ -1,55 +1,45 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, Suspense } from 'react';
+
+// 라이브러리 로딩 문제로 인한 렌더링 오류 방지를 위해 Dynamic Import 적용
+const ForceGraph2D = React.lazy(() => import('react-force-graph-2d'));
 
 const CollaborationGraph = ({ data }) => {
-  const svgRef = useRef(null);
   const [nodes, setNodes] = useState([]);
   const [links, setLinks] = useState([]);
-  
-  const [viewBox, setViewBox] = useState({ x: 0, y: 0, w: 400, h: 400 });
-  const [draggingNode, setDraggingNode] = useState(null);
-  const [isPanning, setIsPanning] = useState(false);
-  const [lastPanPos, setLastPanPos] = useState({ x: 0, y: 0 });
 
   // 점수에 따른 노드 반경 계산 (에러 방어 포함)
   const getRadius = (score) => {
     const num = Number(score);
-    const safeScore = isNaN(num) ? 70 : num;
+    const safeScore = isNaN(num) ? 70 : num; // score가 "N/A" 등 문자열일 때 NaN이 되는 것을 100% 방어
     return Math.max(15, (safeScore - 70) * 0.8 + 18);
   };
-
-  const findNode = (id) => nodes.find(n => String(n.id).toLowerCase() === String(id).toLowerCase());
 
   useEffect(() => {
     if (!data || data.length === 0) return;
 
     const colors = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#6366f1'];
     
-    // 1. 노드 생성 (원형으로 균등 배치)
-    const radius = Math.min(120, data.length * 25);
-    const centerX = 200;
-    const centerY = 200;
-    
-    const newNodes = data.map((member, index) => {
-      const angle = (index / data.length) * 2 * Math.PI;
-      return {
-        id: member.id,
-        name: member.name || member.id,
-        x: centerX + radius * Math.cos(angle),
-        y: centerY + radius * Math.sin(angle),
-        color: colors[index % colors.length],
-        collaborationScore: member.score || 70, 
-      };
-    });
+    // 1. 노드 생성 (x, y 좌표 계산은 라이브러리가 담당하므로 제거)
+    const newNodes = data.map((member, index) => ({
+      id: member.id,
+      name: member.name || member.id,
+      color: colors[index % colors.length],
+      collaborationScore: member.score || 70, // 점수가 없으면 기본 크기를 위해 70 부여
+    }));
 
     // 2. 링크(연결선) 생성
     const newLinks = [];
     data.forEach(sourceMember => {
       let network = sourceMember.collabNetwork || [];
+      // 방어 코드 1: network가 배열이 아니라 { "Bob": 3, "Charlie": 2 } 형태의 객체일 경우 배열로 변환
       if (network && !Array.isArray(network) && typeof network === 'object') {
         network = Object.entries(network).map(([k, v]) => ({ target: k, value: v }));
       }
+      
       if (!Array.isArray(network)) network = [];
 
+      const sourceNode = newNodes.find(n => n.id === sourceMember.id);
+      if (!sourceNode) return;
       const sourceId = String(sourceMember.id);
       
       network.forEach(edge => {
@@ -58,15 +48,21 @@ const CollaborationGraph = ({ data }) => {
         let targetId = '';
         let value = 1;
 
+        // 백엔드 응답이 문자열, 배열, 혹은 여러 key를 가진 객체일 경우를 모두 지원하도록 유연하게 추출
         if (typeof edge === 'string') {
           targetId = edge;
         } else if (Array.isArray(edge)) {
           targetId = edge[0];
           value = Number(edge[1]) || 1;
         } else {
-          targetId = edge.target || edge.target_user || edge.collaborator || edge.username || edge.id || edge.user || edge.name;
-          value = Number(edge.value || edge.weight || edge.count || edge.score) || 1;
+          // target_username 필드 매핑 추가
+          targetId = edge.target || edge.target_username || edge.target_user || edge.collaborator || edge.username || edge.id || edge.user || edge.name;
+          
+          // weight 값이 0인 경우를 정확히 인식하기 위해 || 대신 ??(Null 병합 연산자) 사용
+          const rawValue = edge.weight ?? edge.value ?? edge.count ?? edge.score;
+          value = rawValue !== undefined ? Number(rawValue) : 1;
 
+          // 방어 코드 2: 명시적 key가 없고 { "Bob": 3 } 처럼 이름이 Key인 경우 추출
           if (!targetId && Object.keys(edge).length > 0) {
             const firstKey = Object.keys(edge)[0];
             targetId = firstKey;
@@ -74,9 +70,14 @@ const CollaborationGraph = ({ data }) => {
           }
         }
         
+        // 가중치(weight)가 0인 경우 서로 교류가 없는 것이므로 선을 연결하지 않음
+        if (value <= 0) return;
+        
         if (targetId) {
           targetId = String(targetId);
-          if (sourceId.toLowerCase() !== targetId.toLowerCase()) {
+          const targetNode = newNodes.find(n => String(n.id).toLowerCase() === targetId.toLowerCase());
+
+          if (targetNode && sourceId.toLowerCase() !== targetId.toLowerCase()) {
             const existingLink = newLinks.find(l => 
               (l.source.toLowerCase() === sourceId.toLowerCase() && l.target.toLowerCase() === targetId.toLowerCase()) ||
               (l.source.toLowerCase() === targetId.toLowerCase() && l.target.toLowerCase() === sourceId.toLowerCase())
@@ -107,142 +108,85 @@ const CollaborationGraph = ({ data }) => {
     
     setNodes(newNodes);
     setLinks(newLinks);
-
-    // 인원수에 맞춰 초기 뷰포트(ViewBox) 동적 조절
-    const maxRange = radius * 2 + 100;
-    setViewBox({ x: centerX - maxRange / 2, y: centerY - maxRange / 2, w: maxRange, h: maxRange });
   }, [data]);
 
-  // 드래그 핸들러
-  const onMouseDown = (id) => (e) => {
-    setDraggingNode(id);
-    e.stopPropagation();
-  };
+  // 노드 커스텀 렌더링 (Canvas 기반)
+  const nodeCanvasObject = useCallback((node, ctx, globalScale) => {
+    // 방어 코드: 좌표가 아직 없거나 NaN일 경우 캔버스 렌더링 크래시 완전 차단
+    if (!node || typeof node.x !== 'number' || isNaN(node.x) || typeof node.y !== 'number' || isNaN(node.y)) return;
 
-  const onBackgroundMouseDown = (e) => {
-    if (e.button !== 0) return; // 왼쪽 마우스 클릭만 허용
-    setIsPanning(true);
-    setLastPanPos({ x: e.clientX, y: e.clientY });
-  };
+    const label = node.name || node.id;
+    const radius = getRadius(node.collaborationScore);
+    const scale = globalScale > 0 ? globalScale : 1; // 0으로 나누기 오류 방지
+    
+    // 노드 원 그리기
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
+    ctx.fillStyle = 'white';
+    ctx.fill();
+    ctx.strokeStyle = node.color;
+    ctx.lineWidth = 3 / scale; // 줌 레벨에 따라 선 두께 보정
+    ctx.stroke();
 
-  const onMouseMove = (e) => {
-    if (!svgRef.current) return;
-    if (!draggingNode && !isPanning) return;
+    // 원 안에 이니셜 텍스트
+    const initialFontSize = radius * 0.9; // 원 크기에 비례하는 폰트 크기
+    ctx.font = `bold ${initialFontSize}px Inter, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = node.color;
+    ctx.fillText(String(label).charAt(0).toUpperCase(), node.x, node.y);
+    
+    // 노드 아래 이름 텍스트
+    const labelFontSize = 12 / scale;
+    ctx.font = `600 ${labelFontSize}px Inter, sans-serif`;
+    ctx.fillStyle = '#475569';
+    ctx.fillText(label, node.x, node.y + radius + (16 / globalScale));
+  }, []);
 
-    e.preventDefault(); 
+  // 링크 위에 마우스 올렸을 때 툴팁 내용
+  const linkLabel = useCallback(link => {
+    // 라이브러리 내부 동작에 의해 link.source가 ID(문자열) 또는 노드(객체)일 수 있음을 모두 처리
+    const srcName = typeof link.source === 'object' ? (link.source.name || link.source.id) : link.source;
+    const tgtName = typeof link.target === 'object' ? (link.target.name || link.target.id) : link.target;
 
-    const svg = svgRef.current;
-    const CTM = svg.getScreenCTM();
-    if (!CTM) return;
-
-    if (draggingNode) {
-      const x = (e.clientX - CTM.e) / CTM.a;
-      const y = (e.clientY - CTM.f) / CTM.d;
-      setNodes(prev => prev.map(n => n.id === draggingNode ? { ...n, x, y } : n));
-    } else if (isPanning) {
-      const dx = e.clientX - lastPanPos.x;
-      const dy = e.clientY - lastPanPos.y;
-      
-      setViewBox(prev => ({ ...prev, x: prev.x - dx / CTM.a, y: prev.y - dy / CTM.d }));
-      setLastPanPos({ x: e.clientX, y: e.clientY });
-    }
-  };
-
-  const onMouseUp = () => {
-    setDraggingNode(null);
-    setIsPanning(false);
-  };
-
-  useEffect(() => {
-    const svgElement = svgRef.current;
-    if (!svgElement) return;
-
-    const handleWheel = (e) => {
-      e.preventDefault(); 
-      const scale = e.deltaY > 0 ? 1.1 : 0.9;
-      
-      setViewBox(prev => ({
-        ...prev,
-        x: prev.x + (prev.w - prev.w * scale) / 2,
-        y: prev.y + (prev.h - prev.h * scale) / 2,
-        w: prev.w * scale,
-        h: prev.h * scale
-      }));
-    };
-
-    svgElement.addEventListener('wheel', handleWheel, { passive: false });
-    return () => svgElement.removeEventListener('wheel', handleWheel);
+    return `
+      <div style="padding: 5px; background-color: rgba(0,0,0,0.7); color: white; border-radius: 4px; font-size: 0.8rem;">
+        ${srcName} → ${tgtName}: ${link.sToT !== undefined ? link.sToT : link.value}회
+        ${link.tToS ? `<br/>${tgtName} → ${srcName}: ${link.tToS}회` : ''}
+      </div>
+    `;
   }, []);
 
   return (
-    <div 
-      style={{ 
-        width: '100%', 
-        height: '100%', 
-        position: 'relative', 
-        cursor: draggingNode || isPanning ? 'grabbing' : 'grab',
-        touchAction: 'none' 
-      }}
-      onMouseDown={onBackgroundMouseDown}
-      onMouseMove={onMouseMove}
-      onMouseUp={onMouseUp}
-      onMouseLeave={onMouseUp}
-    >
-      <svg 
-        ref={svgRef}
-        width="100%" 
-        height="400" 
-        viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`} 
-        preserveAspectRatio="xMidYMid meet"
-      >
-        <defs>
-          <marker id="arrowhead" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
-            <path d="M0,0 L10,5 L0,10 Z" fill="#cbd5e1" />
-          </marker>
-        </defs>
-        
-        {links.map((link, i) => {
-          const s = findNode(link.source);
-          const t = findNode(link.target);
-          if (!s || !t) return null;
-
-          const dx = t.x - s.x;
-          const dy = t.y - s.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          
-          if (dist === 0) return null;
-
-          const sourceR = getRadius(s.collaborationScore) + 3;
-          const targetR = getRadius(t.collaborationScore) + 3;
-          
-          const x1 = s.x + (dx * sourceR) / dist;
-          const y1 = s.y + (dy * sourceR) / dist;
-          const x2 = t.x - (dx * targetR) / dist;
-          const y2 = t.y - (dy * targetR) / dist;
-
-          return (
-            <line
-              key={`link-${i}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke="#cbd5e1" strokeOpacity="0.6" strokeWidth={Math.max(2, (link.value || 1) * 4)}
-              markerStart={link.bidirectional ? "url(#arrowhead)" : undefined} markerEnd="url(#arrowhead)"
-            >
-              <title>
-                {`${link.source} → ${link.target}: ${link.sToT !== undefined ? link.sToT : link.value}회`}
-                {link.tToS ? `\n${link.target} → ${link.source}: ${link.tToS}회` : ''}
-              </title>
-            </line>
-          );
-        })}
-
-        {nodes.map((node) => (
-          <g key={node.id} onMouseDown={onMouseDown(node.id)} style={{ cursor: draggingNode === node.id ? 'grabbing' : 'grab' }}>
-            <title>{`${node.id}: 협업 점수 ${node.collaborationScore}점`}</title>
-            <circle cx={node.x} cy={node.y} r={getRadius(node.collaborationScore)} fill="white" stroke={node.color} strokeWidth={draggingNode === node.id ? "4" : "3"} style={{ filter: draggingNode === node.id ? 'drop-shadow(0px 4px 6px rgba(0,0,0,0.2))' : 'drop-shadow(0px 2px 3px rgba(0,0,0,0.1))', transition: 'filter 0.2s, stroke-width 0.2s' }} />
-            <text x={node.x} y={node.y} textAnchor="middle" dy=".3em" fill={node.color} style={{ fontSize: '10px', fontWeight: 'bold' }}>{String(node.name || node.id).charAt(0).toUpperCase()}</text>
-            <text x={node.x} y={node.y + getRadius(node.collaborationScore) + 16} textAnchor="middle" fill="#475569" style={{ fontSize: '11px', fontWeight: '600', pointerEvents: 'none' }}>{node.name || node.id}</text>
-          </g>
-        ))}
-      </svg>
-    </div>
+    <Suspense fallback={<div style={{ color: '#64748b' }}>그래프를 로딩 중입니다...</div>}>
+      <ForceGraph2D
+        graphData={{ nodes, links }}
+        // 노드 설정
+        nodeId="id"
+        nodeVal={node => getRadius(node.collaborationScore) * 1.5} // 충돌 반경
+        nodeCanvasObject={nodeCanvasObject}
+        nodeLabel={node => `${node.name}: 협업 점수 ${node.collaborationScore}점`}
+        // 링크 설정
+        linkWidth={link => Math.max(1, (link.value || 1) * 1.5)}
+        linkColor={() => 'rgba(100, 116, 139, 0.5)'}
+        linkDirectionalArrowLength={5}
+        linkDirectionalArrowRelPos={1}
+        // 양방향 링크는 역방향으로 흐르는 파티클로 표현
+        linkDirectionalParticles={link => link.bidirectional ? 2 : 0}
+        linkDirectionalParticleWidth={2.5}
+        linkDirectionalParticleSpeed={0.006}
+        // 툴팁 설정
+        linkLabel={linkLabel}
+        // 상호작용 설정
+        onNodeDragEnd={node => {
+          node.fx = node.x; // 드래그가 끝나면 노드 위치 고정
+          node.fy = node.y;
+        }}
+        // 물리 엔진 설정
+        cooldownTicks={200} // 시뮬레이션 안정화 시간
+        d3AlphaDecay={0.05} // 시뮬레이션 감쇠율
+      />
+    </Suspense>
   );
 };
 

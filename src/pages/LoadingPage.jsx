@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 
@@ -10,11 +10,17 @@ const LoadingPage = () => {
   const [statusMessage, setStatusMessage] = useState('프로젝트 생성 중...');
   const [error, setError] = useState(null);
 
+  // React StrictMode로 인해 useEffect가 두 번 실행되어 API가 중복 호출되는 것을 방지
+  const hasStarted = useRef(false);
+
   useEffect(() => {
     if (!repoUrl) {
       setError('분석할 리포지토리 URL이 없습니다.');
       return;
     }
+
+    if (hasStarted.current) return; // 이미 API 호출이 시작되었다면 중복 실행 방지
+    hasStarted.current = true;
 
     let isMounted = true;
     let pollTimer = null;
