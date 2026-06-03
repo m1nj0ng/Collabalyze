@@ -31,7 +31,7 @@ from ai_analysis_api import (
     run_gemini_pr_issue_summaries,
 )
 from ai_engine import GitHubInsightEngine
-from ai_engine import SCORE_CONFIG, STATIC_DEFAULT_SCORE
+from ai_engine import SCORE_CONFIG, SCORE_NO_ACTIVITY, has_quant_activity, static_score_for_row
 
 
 INPUT_PATH = Path("data.json")
@@ -125,26 +125,34 @@ def _load_existing_pr_issue_summaries() -> tuple[dict[int, str], dict[int, str]]
 def _apply_static_backend_only_scores(raw_json: dict, result_df: pd.DataFrame) -> pd.DataFrame:
     """기존 분석결과 DF에 backend_code_score 기반 static/final 점수만 재적용."""
     users_raw = raw_json.get("data", raw_json) if isinstance(raw_json, dict) else raw_json
-    backend_by_name: dict[str, float] = {}
+    row_by_name: dict[str, dict] = {}
     if isinstance(users_raw, list):
         for user in users_raw:
             username = str(user.get("username", "")).strip()
             if not username:
                 continue
+            q = user.get("1_quantitative_data", {}) or {}
             s = user.get("3_static_code_analysis_data", {}) or {}
-            raw_backend = s.get("backend_code_score")
-            try:
-                backend_by_name[username] = float(raw_backend) if raw_backend is not None else STATIC_DEFAULT_SCORE
-            except (TypeError, ValueError):
-                backend_by_name[username] = STATIC_DEFAULT_SCORE
+            row_by_name[username] = {
+                "commits": q.get("commits", 0),
+                "loc_added": q.get("loc_added", 0),
+                "pull_requests": q.get("pull_requests", 0),
+                "issues": q.get("issues", 0),
+                "code_reviews": q.get("code_reviews", 0),
+                "backend_score": s.get("backend_code_score"),
+            }
 
     df = result_df.copy()
     if "name" not in df.columns:
         return df
 
-    df["static_backend_score"] = (
-        df["name"].map(backend_by_name).fillna(STATIC_DEFAULT_SCORE).astype(float).clip(0, 100)
-    )
+    def _static_for_name(name: str) -> float:
+        base = row_by_name.get(str(name), {})
+        if not base:
+            return SCORE_NO_ACTIVITY
+        return static_score_for_row(base)
+
+    df["static_backend_score"] = df["name"].map(_static_for_name).astype(float)
     if "static_score" in df.columns:
         df["static_score"] = df["static_backend_score"]
     if "static_complexity_score" in df.columns:
@@ -159,6 +167,11 @@ def _apply_static_backend_only_scores(raw_json: dict, result_df: pd.DataFrame) -
         wq, wc, ws = SCORE_CONFIG["w_quant"], SCORE_CONFIG["w_collab"], SCORE_CONFIG["w_static"]
         denom = wq + wc + ws
         df["final_score"] = (df["quant_score"] * wq + df["collab_score"] * wc + df["static_score"] * ws) / denom
+        for _, r in df.iterrows():
+            name = str(r["name"])
+            base = row_by_name.get(name, {})
+            if base and not has_quant_activity(base) and float(base.get("loc_added", 0) or 0) == 0:
+                df.loc[df["name"] == name, "final_score"] = SCORE_NO_ACTIVITY
     return df
 
 

@@ -10,17 +10,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
 from ai_engine import (
+    GEMINI_INTER_CHUNK_SLEEP_SEC,
     GEMINI_MODEL_DEFAULT,
     GEMINI_SUMMARY_MAX_CHARS,
-    _gemini_format_error,
-    _gemini_generate_with_retries,
-    _gemini_response_text,
-    _gemini_strip_code_fence,
+    _gemini_parse_json_with_retries,
     flat_comment_texts,
     normalize_outline_summary,
 )
@@ -329,63 +328,123 @@ def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[
     pr_out: Dict[int, str] = {}
     issue_out: Dict[int, str] = {}
 
+    def _pr_prompt_block(num: int) -> str:
+        meta = prs[num]
+        cm = "\n".join(meta["comments"][:15])
+        return f"### PR #{num}\n제목: {meta['title']}\n본문: {meta['body'][:2000]}\n코멘트:\n{cm}\n"
+
+    def _issue_prompt_block(num: int) -> str:
+        meta = issues[num]
+        cm = "\n".join(meta["comments"][:15])
+        return f"### Issue #{num}\n제목: {meta['title']}\n본문: {meta['body'][:2000]}\n코멘트:\n{cm}\n"
+
     def _run_pr_chunk(chunk_nums: List[int]) -> Dict[int, str]:
-        blocks = []
-        for num in chunk_nums:
-            meta = prs[num]
-            cm = "\n".join(meta["comments"][:15])
-            blocks.append(
-                f"### PR #{num}\n제목: {meta['title']}\n본문: {meta['body'][:2000]}\n코멘트:\n{cm}\n"
-            )
+        blocks = [_pr_prompt_block(num) for num in chunk_nums]
         prompt = f"""GitHub PR 요약. 출력은 JSON만:
 {{"prs": [{{"pr_number": 번호, "summary": "개조식 한 줄(명사형)"}}]}}
 
 규칙: 아래 나열된 PR 번호만 모두 포함. 각 summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
 
 {"".join(blocks)}"""
-        resp = _gemini_generate_with_retries(client, model_name, prompt, max_out_tokens=8192)
-        return _parse_pr_issue_summaries(_gemini_response_text(resp), "prs")
+        return _gemini_parse_json_with_retries(
+            client,
+            model_name,
+            prompt,
+            lambda raw: _parse_pr_issue_summaries(raw, "prs"),
+            max_out_tokens=8192,
+        )
+
+    def _run_single_pr(num: int) -> str:
+        prompt = f"""GitHub PR 요약. 출력은 JSON만:
+{{"prs": [{{"pr_number": {num}, "summary": "개조식 한 줄(명사형)"}}]}}
+
+규칙: summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
+
+{_pr_prompt_block(num)}"""
+        try:
+            part = _gemini_parse_json_with_retries(
+                client,
+                model_name,
+                prompt,
+                lambda raw: _parse_pr_issue_summaries(raw, "prs"),
+                max_out_tokens=2048,
+            )
+            return part.get(num) or _fallback_pr_issue_summary(prs[num])
+        except Exception:
+            return _fallback_pr_issue_summary(prs[num])
+
+    def _fill_pr_chunk(chunk_nums: List[int], part: Optional[Dict[int, str]] = None) -> None:
+        for n in chunk_nums:
+            if part and part.get(n):
+                pr_out[n] = part[n]
+            else:
+                pr_out[n] = _run_single_pr(n)
 
     if prs:
         pr_nums = sorted(prs.keys())
         for i in range(0, len(pr_nums), GEMINI_PR_ISSUE_CHUNK):
+            if i > 0 and GEMINI_INTER_CHUNK_SLEEP_SEC > 0:
+                time.sleep(GEMINI_INTER_CHUNK_SLEEP_SEC)
             chunk = pr_nums[i : i + GEMINI_PR_ISSUE_CHUNK]
             try:
                 part = _run_pr_chunk(chunk)
-                pr_out.update(part)
-            except Exception as exc:
-                err = _gemini_format_error(exc)
-                for n in chunk:
-                    pr_out[n] = err
+                _fill_pr_chunk(chunk, part)
+            except Exception:
+                _fill_pr_chunk(chunk, None)
 
     def _run_issue_chunk(chunk_nums: List[int]) -> Dict[int, str]:
-        blocks = []
-        for num in chunk_nums:
-            meta = issues[num]
-            cm = "\n".join(meta["comments"][:15])
-            blocks.append(
-                f"### Issue #{num}\n제목: {meta['title']}\n본문: {meta['body'][:2000]}\n코멘트:\n{cm}\n"
-            )
+        blocks = [_issue_prompt_block(num) for num in chunk_nums]
         prompt = f"""GitHub Issue 요약. 출력은 JSON만:
 {{"issues": [{{"issue_number": 번호, "summary": "개조식 한 줄(명사형)"}}]}}
 
 규칙: 아래 나열된 Issue 번호만 모두 포함. 각 summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
 
 {"".join(blocks)}"""
-        resp = _gemini_generate_with_retries(client, model_name, prompt, max_out_tokens=8192)
-        return _parse_pr_issue_summaries(_gemini_response_text(resp), "issues")
+        return _gemini_parse_json_with_retries(
+            client,
+            model_name,
+            prompt,
+            lambda raw: _parse_pr_issue_summaries(raw, "issues"),
+            max_out_tokens=8192,
+        )
+
+    def _run_single_issue(num: int) -> str:
+        prompt = f"""GitHub Issue 요약. 출력은 JSON만:
+{{"issues": [{{"issue_number": {num}, "summary": "개조식 한 줄(명사형)"}}]}}
+
+규칙: summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
+
+{_issue_prompt_block(num)}"""
+        try:
+            part = _gemini_parse_json_with_retries(
+                client,
+                model_name,
+                prompt,
+                lambda raw: _parse_pr_issue_summaries(raw, "issues"),
+                max_out_tokens=2048,
+            )
+            return part.get(num) or _fallback_pr_issue_summary(issues[num])
+        except Exception:
+            return _fallback_pr_issue_summary(issues[num])
+
+    def _fill_issue_chunk(chunk_nums: List[int], part: Optional[Dict[int, str]] = None) -> None:
+        for n in chunk_nums:
+            if part and part.get(n):
+                issue_out[n] = part[n]
+            else:
+                issue_out[n] = _run_single_issue(n)
 
     if issues:
         issue_nums = sorted(issues.keys())
         for i in range(0, len(issue_nums), GEMINI_PR_ISSUE_CHUNK):
+            if i > 0 and GEMINI_INTER_CHUNK_SLEEP_SEC > 0:
+                time.sleep(GEMINI_INTER_CHUNK_SLEEP_SEC)
             chunk = issue_nums[i : i + GEMINI_PR_ISSUE_CHUNK]
             try:
                 part = _run_issue_chunk(chunk)
-                issue_out.update(part)
-            except Exception as exc:
-                err = _gemini_format_error(exc)
-                for n in chunk:
-                    issue_out[n] = err
+                _fill_issue_chunk(chunk, part)
+            except Exception:
+                _fill_issue_chunk(chunk, None)
 
     for n, meta in prs.items():
         pr_out.setdefault(n, _fallback_pr_issue_summary(meta))

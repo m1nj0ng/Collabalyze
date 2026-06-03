@@ -22,20 +22,36 @@ GEMINI_SUMMARY_MAX_CHARS = 220
 # 사용자당 Gemini 1회: 커밋 목록에 넣을 한 줄 최대 길이·한 요청당 최대 커밋 수
 GEMINI_COMMIT_LINE_IN_PROMPT = int(os.environ.get("GEMINI_COMMIT_LINE_IN_PROMPT", "500"))
 GEMINI_MAX_COMMITS_PER_USER = int(os.environ.get("GEMINI_MAX_COMMITS_PER_USER", "80"))
+# 커밋이 이 개수를 초과하면 청크 분할 요약(C), 이하이면 단일 요청
+GEMINI_COMMIT_CHUNK_SIZE = int(os.environ.get("GEMINI_COMMIT_CHUNK_SIZE", "25"))
 GEMINI_MAX_RETRIES = int(os.environ.get("GEMINI_MAX_RETRIES", "4"))
 GEMINI_RETRY_BASE_SEC = float(os.environ.get("GEMINI_RETRY_BASE_SEC", "2.0"))
 GEMINI_INTER_CHUNK_SLEEP_SEC = float(os.environ.get("GEMINI_INTER_CHUNK_SLEEP_SEC", "1.0"))
+GEMINI_JSON_PARSE_RETRIES = int(os.environ.get("GEMINI_JSON_PARSE_RETRIES", "2"))
 
 PRIMARY_EMBEDDING_MODEL = "BAAI/bge-m3"
 FALLBACK_EMBEDDING_MODEL = "intfloat/multilingual-e5-large-instruct"
 
 SCORE_CONFIG = {"w_quant": 0.2, "w_collab": 0.5, "w_static": 0.3}
 COLLAB_CHANNEL_WEIGHTS = {"commit": 0.25, "pr": 0.45, "issue": 0.30}
-COLLAB_NEUTRAL_ALL_MISSING = 70.0
+# 정량 하위 지표 가중치 (합 = 1.0)
+QUANT_COMPONENT_WEIGHTS = {
+    "commits": 0.15,
+    "pull_requests": 0.20,
+    "issues": 0.15,
+    "code_reviews": 0.20,
+    "log1p_loc_added": 0.10,
+    "log1p_loc_deleted": 0.10,
+    "loc_per_commit": 0.10,
+}
+# 활동/텍스트/코드 데이터 없음 → 0점 (기본 70점 시스템 제거)
+SCORE_NO_ACTIVITY = 0.0
 MIN_N_RELATIVE = 5
 MIN_N_ISOF = 8
 COMPLEXITY_LOWER_IS_BETTER = True
-STATIC_DEFAULT_SCORE = 70.0
+# 하위 호환: 예전 이름 참조 방지
+COLLAB_NEUTRAL_ALL_MISSING = SCORE_NO_ACTIVITY
+STATIC_DEFAULT_SCORE = SCORE_NO_ACTIVITY
 
 RUBRIC_COMMIT = re.compile(
     r"^(feat|fix|refactor|docs|chore|test|style|perf|build|ci)(\([^)]+\))?!?:",
@@ -65,17 +81,71 @@ ANCHOR_NEG = [
 ]
 
 
-def robust_rating(series, neutral=70.0, scale=15.0, min_n=MIN_N_RELATIVE):
-    s = pd.to_numeric(series, errors="coerce")
-    valid = s.dropna()
-    if len(valid) < min_n:
-        return pd.Series([neutral] * len(s), index=s.index)
-    med = valid.median()
-    mad = (valid - med).abs().median()
+def rate_quant_column(series: pd.Series, min_n: int = MIN_N_RELATIVE) -> pd.Series:
+    """정량 지표 점수: 0 활동은 0점, 소표본은 순위(percentile), 충분 시 MAD 상대평가."""
+    s = pd.to_numeric(series, errors="coerce").fillna(0.0)
+    out = pd.Series(SCORE_NO_ACTIVITY, index=s.index, dtype=float)
+    positive = s > 0
+    if not positive.any():
+        return out
+    n = len(s)
+    if n < min_n:
+        ranks = s.rank(method="average", pct=True) * 100.0
+        out.loc[positive] = ranks.loc[positive]
+        return out.clip(0, 100)
+    med = s.median()
+    mad = (s - med).abs().median()
     if mad == 0 or np.isnan(mad):
-        return pd.Series([neutral] * len(s), index=s.index)
+        ranks = s.rank(method="average", pct=True) * 100.0
+        out.loc[positive] = ranks.loc[positive]
+        return out.clip(0, 100)
     rz = 0.6745 * (s - med) / mad
-    return (neutral + rz * scale).clip(0, 100)
+    rated = (50.0 + rz * 15.0).clip(0, 100)
+    out.loc[positive] = rated.loc[positive]
+    return out
+
+
+def quant_activity_count(row) -> int:
+    return int(row.get("commits", 0) or 0) + int(row.get("pull_requests", 0) or 0) + int(
+        row.get("issues", 0) or 0
+    ) + int(row.get("code_reviews", 0) or 0)
+
+
+def has_quant_activity(row) -> bool:
+    return quant_activity_count(row) > 0 or float(row.get("loc_added", 0) or 0) > 0
+
+
+def compute_weighted_quant_score(df: pd.DataFrame, quant_cols: List[str]) -> pd.Series:
+    """QUANT_COMPONENT_WEIGHTS 기반 가중 평균 quant_score."""
+    weighted_sum = pd.Series(0.0, index=df.index, dtype=float)
+    total_weight = 0.0
+    for col in quant_cols:
+        w = float(QUANT_COMPONENT_WEIGHTS.get(col, 0.0))
+        if w <= 0:
+            continue
+        score_col = f"quant_{col}_score"
+        if score_col not in df.columns:
+            continue
+        weighted_sum += pd.to_numeric(df[score_col], errors="coerce").fillna(0.0) * w
+        total_weight += w
+    if total_weight <= 0:
+        return pd.Series(SCORE_NO_ACTIVITY, index=df.index, dtype=float)
+    return (weighted_sum / total_weight).clip(0, 100)
+
+
+def static_score_for_row(row) -> float:
+    """코드 활동 없음 또는 backend 점수 없음 → 0."""
+    commits = int(row.get("commits", 0) or 0)
+    loc_added = float(row.get("loc_added", 0) or 0)
+    if commits == 0 and loc_added == 0:
+        return SCORE_NO_ACTIVITY
+    backend = row.get("backend_score")
+    if backend is None or (isinstance(backend, float) and np.isnan(backend)):
+        return SCORE_NO_ACTIVITY
+    try:
+        return float(np.clip(float(backend), 0, 100))
+    except (TypeError, ValueError):
+        return SCORE_NO_ACTIVITY
 
 
 def impute_median(series):
@@ -107,7 +177,7 @@ def effective_collab_weights(commit_avg, pr_avg, issue_avg, weights):
     return {key: (weights[key] / denom if key in used else 0.0) for key in weights}, used
 
 
-def blend_collab_channels(commit_avg, pr_avg, issue_avg, weights, neutral=COLLAB_NEUTRAL_ALL_MISSING):
+def blend_collab_channels(commit_avg, pr_avg, issue_avg, weights, neutral=SCORE_NO_ACTIVITY):
     eff_w, used = effective_collab_weights(commit_avg, pr_avg, issue_avg, weights)
     if not used:
         return float(neutral)
@@ -279,6 +349,40 @@ def _gemini_generate_with_retries(client, model_name: str, prompt: str, max_out_
     raise last_exc  # pragma: no cover
 
 
+def _gemini_parse_json_with_retries(
+    client: Any,
+    model_name: str,
+    prompt: str,
+    parser_fn: Any,
+    *,
+    max_out_tokens: int = 4096,
+) -> Any:
+    """Gemini 호출 후 JSON 파싱 실패 시 재프롬프트 재시도 (A)."""
+    last_exc: Optional[BaseException] = None
+    attempts = GEMINI_JSON_PARSE_RETRIES + 1
+    for attempt in range(attempts):
+        retry_prompt = prompt
+        if attempt > 0:
+            retry_prompt = (
+                prompt
+                + "\n\n[재시도] 반드시 유효한 JSON 객체 하나만 출력하세요. "
+                "마크다운 코드펜스·설명 문장·주석 금지."
+            )
+        resp = _gemini_generate_with_retries(
+            client, model_name, retry_prompt, max_out_tokens=max_out_tokens
+        )
+        raw = _gemini_response_text(resp)
+        try:
+            return parser_fn(raw)
+        except (json.JSONDecodeError, ValueError, TypeError, KeyError) as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(min(2.0, GEMINI_RETRY_BASE_SEC * (attempt + 1)))
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError("Gemini JSON 파싱 실패")
+
+
 def _gemini_extract_json_object(raw_text: str) -> dict:
     text = _gemini_strip_code_fence(raw_text)
     start = text.find("{")
@@ -317,8 +421,157 @@ def _gemini_parse_overall_and_per_commit(raw_text: str, n_commits: int) -> Tuple
     return overall, per
 
 
+def _format_commit_lines(commits: List[str]) -> str:
+    lines = []
+    for local_i, msg in enumerate(commits):
+        line = str(msg).replace("\r", " ").replace("\n", " ")
+        if len(line) > GEMINI_COMMIT_LINE_IN_PROMPT:
+            line = line[: GEMINI_COMMIT_LINE_IN_PROMPT - 1] + "…"
+        lines.append(f"[{local_i}] {line}")
+    return "\n".join(lines) if lines else "(커밋 메시지 없음)"
+
+
+def _gemini_parse_commits_only(raw_text: str, n_commits: int) -> List[str]:
+    """청크 응답에서 커밋별 summary만 추출 (local idx 0..n-1)."""
+    data = _gemini_extract_json_object(raw_text)
+    if not isinstance(data, dict):
+        raise ValueError("최상위 JSON은 객체여야 합니다.")
+    per: List[str] = [""] * n_commits
+    for item in data.get("commits") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("idx", -1))
+        except (TypeError, ValueError):
+            continue
+        if idx < 0 or idx >= n_commits:
+            continue
+        s = normalize_outline_summary(str(item.get("summary", "") or ""))
+        if s:
+            per[idx] = s
+    return per
+
+
+def _fallback_commit_summary(message: str) -> str:
+    line = str(message).replace("\r", " ").replace("\n", " ").strip()
+    if not line:
+        return "(커밋 메시지 없음)"
+    return normalize_outline_summary(line[: GEMINI_SUMMARY_MAX_CHARS])
+
+
+def _gemini_summarize_overall_only(client: Any, model_name: str, username: str, bundle: str) -> str:
+    """전체 활동 맥락만으로 overall 한 줄 생성 (청크 분할 시 별도 호출)."""
+    prompt = f"""당신은 소프트웨어 팀의 GitHub 활동을 요약하는 어시스턴트입니다.
+대상 사용자: "{username}"
+
+출력은 JSON 객체 하나만: {{"overall": "개조식 한 줄(명사형) 활동 요약"}}
+규칙: PR/이슈/커밋 맥락을 반영한 전체 흐름. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
+공백 포함 {GEMINI_SUMMARY_MAX_CHARS}자 이내.
+
+--- 전체 활동 맥락 ---
+{bundle if bundle.strip() else "(비어 있음)"}
+--- 끝 ---"""
+
+    def _parse(raw: str) -> str:
+        data = _gemini_extract_json_object(raw)
+        overall = normalize_outline_summary(str(data.get("overall", "") or ""))
+        if not overall:
+            raise ValueError("overall 비어 있음")
+        return overall
+
+    return _gemini_parse_json_with_retries(
+        client, model_name, prompt, _parse, max_out_tokens=1024
+    )
+
+
+def _gemini_summarize_commits_chunked(
+    client: Any,
+    model_name: str,
+    username: str,
+    head: List[str],
+) -> List[str]:
+    """커밋 목록을 GEMINI_COMMIT_CHUNK_SIZE 단위로 분할 요약 후 merge."""
+    per = [""] * len(head)
+    chunk_size = max(1, GEMINI_COMMIT_CHUNK_SIZE)
+    for start in range(0, len(head), chunk_size):
+        if start > 0 and GEMINI_INTER_CHUNK_SLEEP_SEC > 0:
+            time.sleep(GEMINI_INTER_CHUNK_SLEEP_SEC)
+        chunk = head[start : start + chunk_size]
+        commit_block = _format_commit_lines(chunk)
+        n_local = len(chunk)
+        prompt = f"""당신은 GitHub 커밋 메시지를 요약하는 어시스턴트입니다.
+대상 사용자: "{username}"
+
+출력은 JSON만: {{"commits": [{{"idx": 0, "summary": "개조식 한 줄"}}, ...]}}
+규칙: 아래 목록의 local idx 0..{n_local - 1} 전부 포함. 각 summary 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내.
+"~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
+
+--- 요약 대상 커밋 목록 (local idx) ---
+{commit_block}
+--- 끝 ---"""
+        max_out = min(8192, max(2048, 256 + 120 * n_local))
+        try:
+            part = _gemini_parse_json_with_retries(
+                client,
+                model_name,
+                prompt,
+                lambda raw, n=n_local: _gemini_parse_commits_only(raw, n),
+                max_out_tokens=max_out,
+            )
+            for i, summ in enumerate(part):
+                if summ:
+                    per[start + i] = summ
+                else:
+                    per[start + i] = _fallback_commit_summary(chunk[i])
+        except Exception:
+            for i, msg in enumerate(chunk):
+                per[start + i] = _fallback_commit_summary(msg)
+    return per
+
+
+def _gemini_summarize_user_combined(
+    client: Any,
+    model_name: str,
+    username: str,
+    bundle: str,
+    head: List[str],
+    overflow_note: str,
+) -> Tuple[str, List[str]]:
+    """커밋 수가 적을 때: overall + 커밋별 요약을 한 번에 요청."""
+    commit_block = _format_commit_lines(head)
+    prompt = f"""당신은 소프트웨어 팀의 GitHub 활동을 요약하는 어시스턴트입니다.
+대상 사용자: "{username}"
+
+출력은 JSON 객체 하나만:
+{{"overall": "개조식 한 줄(명사형) 활동 요약", "commits": [{{"idx": 0, "summary": "해당 커밋 개조식 한 줄"}}, ...]}}
+
+규칙:
+1. commits 배열에 idx 0..{len(head) - 1} 전부 포함.
+2. 각 summary 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지.
+3. 텍스트에 근거, 추측 금지.
+
+--- 전체 활동 맥락 ---
+{bundle if bundle.strip() else "(비어 있음)"}
+--- 끝 ---
+
+--- 요약 대상 커밋 목록 ---
+{overflow_note}{commit_block}
+--- 끝 ---"""
+    max_out = min(16384, max(2048, 256 + 120 * len(head)))
+    return _gemini_parse_json_with_retries(
+        client,
+        model_name,
+        prompt,
+        lambda raw: _gemini_parse_overall_and_per_commit(raw, len(head)),
+        max_out_tokens=max_out,
+    )
+
+
 def run_gemini_activity_summaries(df: pd.DataFrame) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """기여자(사용자)당 Gemini **1회** 호출: 전체 활동 맥락 + 커밋 목록을 한 프롬프트로 보냅니다.
+    """사용자별 Gemini 활동 요약.
+
+    - 커밋 ≤ GEMINI_COMMIT_CHUNK_SIZE: overall+커밋 단일 요청
+    - 커밋 >  청크 크기: 커밋 청크 분할 요약(C) + overall 별도 요청
 
     Returns:
         overall_summaries: 사용자별 전체 한 줄 요약 (기존 `gemini_activity_summary` 열)
@@ -358,52 +611,36 @@ def run_gemini_activity_summaries(df: pd.DataFrame) -> Tuple[List[str], List[Dic
         head = commits_all[:GEMINI_MAX_COMMITS_PER_USER]
         overflow_note = ""
         if len(commits_all) > GEMINI_MAX_COMMITS_PER_USER:
-            overflow_note = f"\n(참고: 커밋이 총 {len(commits_all)}개이나, 요약 대상은 아래 {len(head)}개만 지정합니다. idx 0..{len(head)-1}만 출력하세요.)\n"
+            overflow_note = (
+                f"\n(참고: 커밋 총 {len(commits_all)}개, 요약 대상 {len(head)}개, "
+                f"idx 0..{len(head) - 1})\n"
+            )
+        bundle_text = bundle if (bundle or "").strip() else ""
 
-        commit_lines = []
-        for i, msg in enumerate(head):
-            line = msg.replace("\r", " ").replace("\n", " ")
-            if len(line) > GEMINI_COMMIT_LINE_IN_PROMPT:
-                line = line[: GEMINI_COMMIT_LINE_IN_PROMPT - 1] + "…"
-            commit_lines.append(f"[{i}] {line}")
-        commit_block = "\n".join(commit_lines) if commit_lines else "(커밋 메시지 없음 — PR/이슈만 있을 수 있음)"
-
-        prompt = f"""당신은 소프트웨어 팀의 GitHub 활동을 요약하는 어시스턴트입니다.
-대상 사용자: "{username}"
-
-아래 [전체 활동 맥락]에는 커밋/PR/이슈/코멘트가 시간 순서에 가깝게 모여 있습니다.
-아래 [요약 대상 커밋 목록]은 커밋별 한 줄 요약을 만들 인덱스와 메시지입니다.
-
-출력은 **JSON 객체 하나만** 반환하세요. (설명 문장·마크다운 코드펜스 금지)
-형식:
-{{"overall": "개조식 한 줄(명사형) 활동 요약", "commits": [{{"idx": 0, "summary": "해당 커밋 개조식 한 줄"}}, ...]}}
-
-규칙:
-1. "commits" 배열에는 [요약 대상 커밋 목록]에 나온 **모든 idx**(0부터 연속)에 대해 summary를 채우세요. 빠짐없이.
-2. 각 summary는 개조식 한 줄(명사형), 줄바꿈 금지, 공백 포함 {GEMINI_SUMMARY_MAX_CHARS}자 이내.
-3. "~했습니다", "~합니다", "~했다" 같은 문장 종결형 금지.
-4. 텍스트에 근거해 요약하고 없는 내용은 추측하지 마세요.
-5. "overall"은 PR/이슈까지 포함한 전체 흐름을 개조식 한 줄로 요약합니다.
-
---- 전체 활동 맥락 ---
-{bundle if (bundle or "").strip() else "(비어 있음)"}
---- 끝 ---
-
---- 요약 대상 커밋 목록 ---
-{overflow_note}{commit_block}
---- 끝 ---"""
-
-        max_out = min(16384, max(2048, 256 + 120 * len(head)))
         try:
-            resp = _gemini_generate_with_retries(client, model_name, prompt, max_out_tokens=max_out)
-            raw = _gemini_response_text(resp)
-            try:
-                overall, per_head = _gemini_parse_overall_and_per_commit(raw, len(head))
-            except (json.JSONDecodeError, ValueError, TypeError, KeyError):
-                overall = "(Gemini: 응답 JSON 파싱 실패)"
-                per_head = [""] * len(head)
-            if not overall:
-                overall = "(Gemini: 전체 요약 비어 있음)"
+            if head and len(head) > GEMINI_COMMIT_CHUNK_SIZE:
+                per_head = _gemini_summarize_commits_chunked(client, model_name, username, head)
+                try:
+                    overall = _gemini_summarize_overall_only(
+                        client, model_name, username, bundle_text
+                    )
+                except Exception:
+                    filled = [s for s in per_head if s]
+                    overall = filled[0] if filled else "(Gemini: 전체 요약 비어 있음)"
+            elif head:
+                overall, per_head = _gemini_summarize_user_combined(
+                    client, model_name, username, bundle_text, head, overflow_note
+                )
+                if not overall:
+                    overall = "(Gemini: 전체 요약 비어 있음)"
+            else:
+                per_head = []
+                overall = _gemini_summarize_overall_only(
+                    client, model_name, username, bundle_text
+                )
+        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+            overall = "(Gemini: 응답 JSON 파싱 실패)"
+            per_head = [""] * len(head)
         except Exception as exc:
             err = _gemini_format_error(exc)
             overall_out[ui] = err
@@ -636,16 +873,24 @@ class GitHubInsightEngine:
             df["anomaly_status"] = "evaluated"
             df["anomaly_reason"] = "IsolationForest decision_function 기준"
 
+        df["activity_count"] = (
+            df["commits"].fillna(0).astype(int)
+            + df["pull_requests"].fillna(0).astype(int)
+            + df["issues"].fillna(0).astype(int)
+            + df["code_reviews"].fillna(0).astype(int)
+        )
+
         quant_component_cols = []
         for col in quant_cols:
             score_col = f"quant_{col}_score"
-            df[score_col] = robust_rating(df[col])
+            df[score_col] = rate_quant_column(df[col])
             quant_component_cols.append(score_col)
-        df["quant_score"] = df[quant_component_cols].mean(axis=1)
+        df["quant_score"] = compute_weighted_quant_score(df, quant_cols)
+        inactive_quant = ~df.apply(has_quant_activity, axis=1)
+        df.loc[inactive_quant, "quant_score"] = SCORE_NO_ACTIVITY
 
-        # backend_code_score 는 수집 단계에서 이미 복잡도 반영 최종치이므로 static_score 는 backend만 사용.
-        backend_raw = pd.to_numeric(df["backend_score"], errors="coerce")
-        df["static_backend_score"] = backend_raw.fillna(STATIC_DEFAULT_SCORE).clip(0, 100)
+        # backend_code_score: 코드 활동·분석 결과 없으면 0
+        df["static_backend_score"] = df.apply(static_score_for_row, axis=1)
         df["static_complexity_score"] = np.nan
         df["static_complexity_weight_effective"] = 0.0
         df["static_backend_weight_effective"] = 1.0
@@ -655,6 +900,8 @@ class GitHubInsightEngine:
         self._apply_collab_scores(df)
         print("[github-insight] 협업 점수 계산 완료.", flush=True)
         df["final_score"] = weighted_final(df, SCORE_CONFIG)
+        fully_inactive = inactive_quant & (df["loc_added"].fillna(0) == 0)
+        df.loc[fully_inactive, "final_score"] = SCORE_NO_ACTIVITY
 
         validate_score_ranges(
             df,
@@ -709,8 +956,9 @@ class GitHubInsightEngine:
         result_df.attrs["gemini_commit_detail_rows"] = gemini_commit_detail_rows
         result_df.attrs["embedding_model"] = self.embedding_model_name
         result_df.attrs["score_config"] = dict(SCORE_CONFIG)
+        result_df.attrs["quant_component_weights"] = dict(QUANT_COMPONENT_WEIGHTS)
         result_df.attrs["collab_channel_weights"] = dict(COLLAB_CHANNEL_WEIGHTS)
-        result_df.attrs["collab_neutral_all_missing"] = COLLAB_NEUTRAL_ALL_MISSING
+        result_df.attrs["score_no_activity"] = SCORE_NO_ACTIVITY
         result_df.attrs["min_n_for_isolation_forest"] = MIN_N_ISOF
         result_df.attrs["complexity_lower_is_better"] = COMPLEXITY_LOWER_IS_BETTER
         return result_df
@@ -756,7 +1004,12 @@ class GitHubInsightEngine:
             eff_w, used_channels = effective_collab_weights(avg_commit, avg_pr, avg_issue, COLLAB_CHANNEL_WEIGHTS)
             missing_channels = [key for key in COLLAB_CHANNEL_WEIGHTS if key not in used_channels]
 
-            collab_scores.append(blend_collab_channels(avg_commit, avg_pr, avg_issue, COLLAB_CHANNEL_WEIGHTS))
+            if not commit_results and not pr_results and not issue_results:
+                collab_scores.append(SCORE_NO_ACTIVITY)
+            else:
+                collab_scores.append(
+                    blend_collab_channels(avg_commit, avg_pr, avg_issue, COLLAB_CHANNEL_WEIGHTS)
+                )
             commit_vals.append(avg_commit if avg_commit is not None else np.nan)
             pr_vals.append(avg_pr if avg_pr is not None else np.nan)
             issue_vals.append(avg_issue if avg_issue is not None else np.nan)
@@ -872,8 +1125,14 @@ class GitHubInsightEngine:
                 f"현재 {', '.join(missing_channels)} 데이터가 없어 협업 점수는 사용 가능한 채널({', '.join(used_channels) if used_channels else '없음'}) 기준으로 계산되었습니다."
             )
 
-        if pd.isna(row.get("backend_score")):
-            data_notes.append(f"backend_code_score가 없어 정적 점수는 기본점수 {STATIC_DEFAULT_SCORE:.0f}점으로 계산되었습니다.")
+        if float(row.get("static_score", 0) or 0) == SCORE_NO_ACTIVITY and (
+            int(row.get("commits", 0) or 0) == 0 and float(row.get("loc_added", 0) or 0) == 0
+        ):
+            data_notes.append("코드 활동이 없어 정적 점수는 0점입니다.")
+        elif float(row.get("static_score", 0) or 0) == SCORE_NO_ACTIVITY:
+            data_notes.append("backend_code_score가 없어 정적 점수는 0점입니다.")
+        if not used_channels and commit_count == 0 and pr_count == 0 and issue_count == 0:
+            data_notes.append("협업 텍스트(커밋/PR/이슈)가 없어 협업 점수는 0점입니다.")
 
         if row.get("anomaly_status") == "skipped":
             data_notes.append(str(row.get("anomaly_reason")))
