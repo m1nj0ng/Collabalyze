@@ -2872,8 +2872,17 @@ def get_user_repos(user_id):
 
     # 3. 프론트엔드 연동을 위한 데이터 파싱 (레포지토리 이름 및 URL)
     repos = response.json()
-    repo_list = [{"name": repo['full_name'], "url": repo['html_url']} for repo in repos]
-
+    repo_list = [
+    {
+        "name": repo.get("full_name"),
+        "repo_name": repo.get("name"),
+        "url": repo.get("html_url"),
+        "description": repo.get("description"),
+        "selected": False
+    }
+    for repo in repos
+]
+    
     # 4. 최종 JSON 응답 반환
     return jsonify({
         "status": "success",
