@@ -9,6 +9,8 @@ const LoadingPage = () => {
 
   const [statusMessage, setStatusMessage] = useState('프로젝트 생성 중...');
   const [error, setError] = useState(null);
+  const [taskId, setTaskId] = useState(null);
+  const [projectId, setProjectId] = useState(null);
 
   // React StrictMode로 인해 useEffect가 두 번 실행되어 API가 중복 호출되는 것을 방지
   const hasStarted = useRef(false);
@@ -22,73 +24,96 @@ const LoadingPage = () => {
     if (hasStarted.current) return; // 이미 API 호출이 시작되었다면 중복 실행 방지
     hasStarted.current = true;
 
-    let isMounted = true;
-    let pollTimer = null;
-
     const startAnalysis = async () => {
       try {
         setStatusMessage('프로젝트 생성 중...');
         // 1. 프로젝트 생성 API
         const projectRes = await axios.post('http://3.39.190.222:5000/api/projects', { repo_url: repoUrl });
-        const projectId = projectRes.data.project_id;
+        const pid = projectRes.data.project_id;
+        setProjectId(pid);
 
         setStatusMessage('데이터 수집 작업 등록 중...');
         // 2. 데이터 수집 시작 API
-        const collectRes = await axios.post(`http://3.39.190.222:5000/api/projects/${projectId}/collect`);
-        const taskId = collectRes.data.task_id;
-
-        // 3. 작업 상태 Polling (재귀적 setTimeout 사용)
-        const pollStatus = async () => {
-          if (!isMounted) return;
-          try {
-            const statusRes = await axios.get(`http://3.39.190.222:5000/api/projects/tasks/${taskId}`);
-            const state = statusRes.data.state;
-
-            if (state === 'PENDING' || state === 'STARTED') {
-              setStatusMessage('GitHub 데이터 수집 중...');
-              pollTimer = setTimeout(pollStatus, 3000); // 3초 뒤 다시 호출
-            } else if (state === 'SUCCESS') {
-              // 4. 완료 시 Dashboard로 project_id와 함께 리다이렉트
-              // 4. 완료 시 로컬 스토리지에 분석 기록 저장 및 Dashboard로 리다이렉트
-              const savedHistory = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
-              const newHistoryItem = {
-                id: Date.now(),
-                projectId: projectId, // 이 프로젝트 ID를 통해 과거 기록을 바로 조회합니다.
-                name: repoUrl.split('/').pop(),
-                url: repoUrl,
-                date: new Date().toLocaleString('ko-KR', {
-                  year: 'numeric',
-                  month: '2-digit',
-                  day: '2-digit',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                  hour12: true
-                })
-              };
-              localStorage.setItem('analysisHistory', JSON.stringify([newHistoryItem, ...savedHistory].slice(0, 10)));
-
-              navigate('/dashboard', { state: { projectId, repoUrl } });
-            } else if (state === 'FAILURE') {
-              setError('데이터 수집에 실패했습니다 (상태: FAILURE).');
-            }
-          } catch (err) {
-            if (isMounted) setError('작업 상태 조회 중 오류가 발생했습니다.');
-          }
-        };
-
-        pollStatus(); // 첫 상태 확인 시작
+        const collectRes = await axios.post(`http://3.39.190.222:5000/api/projects/${pid}/collect`);
+        setTaskId(collectRes.data.task_id);
       } catch (err) {
-        if (isMounted) setError('API 요청 중 오류가 발생했습니다.');
+        setError('API 요청 중 오류가 발생했습니다.');
       }
     };
 
     startAnalysis();
+  }, [repoUrl]);
+
+  // 3. 작업 상태 Polling (재귀적 setTimeout 사용)
+  useEffect(() => {
+    if (!taskId || !projectId) return;
+
+    let isMounted = true;
+    let pollTimer = null;
+
+    const pollStatus = async () => {
+      if (!isMounted) return;
+      try {
+        const statusRes = await axios.get(`http://3.39.190.222:5000/api/projects/tasks/${taskId}`);
+        const state = statusRes.data.state;
+
+        if (state === 'PENDING' || state === 'STARTED') {
+          setStatusMessage('GitHub 데이터 수집 중...');
+          pollTimer = setTimeout(pollStatus, 3000); // 3초 뒤 다시 호출
+        } else if (state === 'SUCCESS') {
+          // 작업 중 에러 발생 여부 확인
+          if (statusRes.data.result && statusRes.data.result.error) {
+            if (isMounted) setError(`데이터 수집 중 오류가 발생했습니다: ${statusRes.data.result.error}`);
+            return;
+          }
+
+          // 4. 완료 시 로컬 스토리지에 분석 기록 저장 및 Dashboard로 리다이렉트
+          const savedHistory = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
+          const newHistoryId = Date.now();
+          const newHistoryItem = {
+            id: newHistoryId,
+            projectId: projectId, // 이 프로젝트 ID를 통해 과거 기록을 바로 조회합니다.
+            name: repoUrl.split('/').pop(),
+            url: repoUrl,
+            date: new Date().toLocaleString('ko-KR', {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              hour12: true
+            })
+          };
+
+          const newHistoryList = [newHistoryItem, ...savedHistory];
+          // 10개를 초과하는 오래된 기록의 스냅샷 캐시 데이터 삭제
+          if (newHistoryList.length > 10) {
+            const removedItems = newHistoryList.slice(10);
+            removedItems.forEach(item => localStorage.removeItem(`snapshot_${item.id}`));
+          }
+          
+          localStorage.setItem('analysisHistory', JSON.stringify(newHistoryList.slice(0, 10)));
+
+          if (isMounted) {
+            navigate('/dashboard', { state: { projectId, repoUrl, historyId: newHistoryId } });
+          }
+        } else if (state === 'FAILURE') {
+          if (isMounted) setError('데이터 수집에 실패했습니다 (상태: FAILURE).');
+        } else {
+          pollTimer = setTimeout(pollStatus, 3000);
+        }
+      } catch (err) {
+        if (isMounted) setError('작업 상태 조회 중 오류가 발생했습니다.');
+      }
+    };
+
+    pollStatus(); // 첫 상태 확인 시작
 
     return () => {
       isMounted = false; // 컴포넌트 언마운트 시 메모리 누수 방지
       if (pollTimer) clearTimeout(pollTimer);
     };
-  }, [repoUrl, navigate]);
+  }, [taskId, projectId, repoUrl, navigate]);
 
   return (
     <div className="loading-container" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#f1f5f9', fontFamily: '"Inter", sans-serif', padding: '20px' }}>

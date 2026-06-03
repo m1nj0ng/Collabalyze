@@ -78,27 +78,18 @@ const CollaborationGraph = ({ data }) => {
           const targetNode = newNodes.find(n => String(n.id).toLowerCase() === targetId.toLowerCase());
 
           if (targetNode && sourceId.toLowerCase() !== targetId.toLowerCase()) {
+            // 단방향(A->B) 기준으로만 링크를 병합 (양방향은 별도의 선으로 분리)
             const existingLink = newLinks.find(l => 
-              (l.source.toLowerCase() === sourceId.toLowerCase() && l.target.toLowerCase() === targetId.toLowerCase()) ||
-              (l.source.toLowerCase() === targetId.toLowerCase() && l.target.toLowerCase() === sourceId.toLowerCase())
+              l.source.toLowerCase() === sourceId.toLowerCase() && l.target.toLowerCase() === targetId.toLowerCase()
             );
           
             if (existingLink) {
-              if (existingLink.source.toLowerCase() === sourceId.toLowerCase()) {
-                existingLink.sToT = (existingLink.sToT || 0) + value;
-              } else {
-                existingLink.tToS = (existingLink.tToS || 0) + value;
-              }
-              existingLink.value = (existingLink.sToT || 0) + (existingLink.tToS || 0);
-              existingLink.bidirectional = existingLink.sToT > 0 && existingLink.tToS > 0;
+              existingLink.value += value;
             } else {
               newLinks.push({
                 source: sourceId,
                 target: targetId,
-                sToT: value,
-                tToS: 0,
-                value: value,
-                bidirectional: false
+                value: value
               });
             }
           }
@@ -151,8 +142,7 @@ const CollaborationGraph = ({ data }) => {
 
     return `
       <div style="padding: 5px; background-color: rgba(0,0,0,0.7); color: white; border-radius: 4px; font-size: 0.8rem;">
-        ${srcName} → ${tgtName}: ${link.sToT !== undefined ? link.sToT : link.value}회
-        ${link.tToS ? `<br/>${tgtName} → ${srcName}: ${link.tToS}회` : ''}
+        ${srcName} → ${tgtName}: ${link.value}회
       </div>
     `;
   }, []);
@@ -171,10 +161,6 @@ const CollaborationGraph = ({ data }) => {
         linkColor={() => 'rgba(100, 116, 139, 0.5)'}
         linkDirectionalArrowLength={5}
         linkDirectionalArrowRelPos={1}
-        // 양방향 링크는 역방향으로 흐르는 파티클로 표현
-        linkDirectionalParticles={link => link.bidirectional ? 2 : 0}
-        linkDirectionalParticleWidth={2.5}
-        linkDirectionalParticleSpeed={0.006}
         // 툴팁 설정
         linkLabel={linkLabel}
         // 상호작용 설정

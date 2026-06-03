@@ -12,6 +12,8 @@ const DashboardPage = () => {
   
   // 이전 페이지(LoadingPage)에서 전달받은 projectId
   const projectId = location.state?.projectId;
+  // 이전 페이지 또는 MainPage에서 전달받은 기록 고유 ID
+  const historyId = location.state?.historyId;
 
   const [dashboardData, setDashboardData] = useState([]);
   const [timelineData, setTimelineData] = useState(null);
@@ -40,6 +42,19 @@ const DashboardPage = () => {
     const fetchContributions = async () => {
       try {
         setIsLoading(true);
+
+        // 1. 스냅샷(과거 분석 기록) 캐시 확인: 예전 분석 상태를 고정으로 유지
+        if (historyId) {
+          const cachedSnapshot = localStorage.getItem(`snapshot_${historyId}`);
+          if (cachedSnapshot) {
+            const parsedData = JSON.parse(cachedSnapshot);
+            setDashboardData(parsedData.dashboardData);
+            setTimelineData(parsedData.timelineData);
+            setIsLoading(false);
+            return; // 캐시가 있으면 API 통신을 건너뜁니다.
+          }
+        }
+
         const response = await axios.get(`http://3.39.190.222:5000/api/projects/${projectId}/contributions`);
         
         // 응답 데이터가 배열 형태(data)로 온다고 가정
@@ -79,6 +94,7 @@ const DashboardPage = () => {
         });
 
         // 커밋 날짜(date) 데이터를 활용하여 실제 타임라인 데이터 동적 생성
+        let finalTimelineData = { monthly: [], weekly: [], daily: [] };
         const allCommits = apiData.flatMap(user => user['2_nlp_data']?.commits || []);
         if (allCommits.length > 0) {
           const monthlyCounts = {};
@@ -129,13 +145,23 @@ const DashboardPage = () => {
             commits: dailyCounts[key]
           }));
           
-          setTimelineData({ monthly: monthlyTimeline, weekly: weeklyTimeline, daily: dailyTimeline });
-        } else {
-          // 실제 타임라인 데이터가 없을 경우 빈 상태 표시
-          setTimelineData({ monthly: [], weekly: [], daily: [] });
+          finalTimelineData = { monthly: monthlyTimeline, weekly: weeklyTimeline, daily: dailyTimeline };
         }
       
+        setTimelineData(finalTimelineData);
         setDashboardData(mappedData);
+
+        // 2. 새로 불러온 데이터를 스냅샷으로 저장하여, 다음 번에 들어올 때는 고정되도록 처리
+        if (historyId) {
+          try {
+            localStorage.setItem(`snapshot_${historyId}`, JSON.stringify({
+              dashboardData: mappedData,
+              timelineData: finalTimelineData
+            }));
+          } catch (e) {
+            console.warn('로컬 스토리지 용량 제한으로 스냅샷 캐시를 저장하지 못했습니다.');
+          }
+        }
       } catch (err) {
         console.error('API Fetch Error:', err);
         setError('대시보드 데이터를 불러오는 중 오류가 발생했습니다.');

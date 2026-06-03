@@ -175,9 +175,17 @@ const MainPage = () => {
     e.stopPropagation(); // 부모 div의 클릭 이벤트(페이지 이동)가 발생하지 않도록 방지
     if (window.confirm('이 분석 기록을 삭제하시겠습니까?')) {
       setHistory(prevHistory => prevHistory.filter(item => {
-        // 고유 ID가 있으면 ID로 비교하고, 없으면(기존 데이터) URL과 날짜 조합으로 비교하여 삭제합니다.
-        if (item.id && id) return item.id !== id;
-        return !(item.url === url && item.date === date);
+        // 삭제할 기록의 스냅샷 데이터(로컬 스토리지)도 함께 정리합니다.
+        if (item.id && id) {
+          if (item.id === id) {
+            localStorage.removeItem(`snapshot_${id}`);
+            return false;
+          }
+          return true;
+        }
+        const isMatch = item.url === url && item.date === date;
+        if (isMatch && item.id) localStorage.removeItem(`snapshot_${item.id}`);
+        return !isMatch;
       }));
     }
   };
@@ -282,7 +290,7 @@ const MainPage = () => {
                   key={item.id || idx} 
                   onClick={() => {
                     if (item.projectId) {
-                      navigate('/dashboard', { state: { projectId: item.projectId, repoUrl: item.url } });
+                      navigate('/dashboard', { state: { projectId: item.projectId, repoUrl: item.url, historyId: item.id } });
                     } else {
                       navigate('/loading', { state: { repoUrl: item.url } });
                     }
