@@ -9,6 +9,7 @@ const MainPage = () => {
   const [displayedRepos, setDisplayedRepos] = useState([]);
   const [selectedRepoUrl, setSelectedRepoUrl] = useState('');
   const [isFetchingExternal, setIsFetchingExternal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // 상태를 localStorage에서 초기화하거나 기본값으로 설정
   const [isLoggedIn, setIsLoggedIn] = useState(() => {
@@ -22,6 +23,10 @@ const MainPage = () => {
   const [history, setHistory] = useState(() => {
     const savedHistory = localStorage.getItem('analysisHistory');
     return savedHistory ? JSON.parse(savedHistory) : [];
+  });
+  const [externalHistory, setExternalHistory] = useState(() => {
+    const savedExternal = localStorage.getItem('externalHistory');
+    return savedExternal ? JSON.parse(savedExternal) : [];
   });
   const navigate = useNavigate();
 
@@ -65,7 +70,9 @@ const MainPage = () => {
         groups[owner].push({
           name: fullName,
           repo_name: name,
-          url: repo.html_url || repo.url
+          url: repo.html_url || repo.url,
+          description: repo.description,
+          private: repo.private
         });
       }
     });
@@ -100,14 +107,21 @@ const MainPage = () => {
     localStorage.setItem('analysisHistory', JSON.stringify(history));
   }, [history]);
 
+  // externalHistory 상태가 변경될 때마다 localStorage에 저장
+  useEffect(() => {
+    localStorage.setItem('externalHistory', JSON.stringify(externalHistory));
+  }, [externalHistory]);
+
   // 선택된 탭이나 오너(Owner)가 바뀔 때 표시할 리포지토리 목록 갱신
   useEffect(() => {
     if (activeTab === 'my' && selectedOwner && myProjects[selectedOwner]) {
       setDisplayedRepos(myProjects[selectedOwner]);
       setSelectedRepoUrl(''); // 명시적 선택 유도를 위해 빈값 초기화
+      setSearchQuery(''); // 탭 이동 시 검색어 초기화
     } else if (activeTab === 'my') {
       setDisplayedRepos([]);
       setSelectedRepoUrl('');
+      setSearchQuery('');
     }
   }, [activeTab, selectedOwner, myProjects]);
 
@@ -118,15 +132,16 @@ const MainPage = () => {
     }
   }, [myProjects, activeTab, selectedOwner]);
 
-  const handleFetchExternalRepos = async () => {
-    if (!externalUrl.trim()) return alert('GitHub 프로젝트 또는 리포지토리 URL을 입력해주세요.');
+  const handleFetchExternalRepos = async (urlToFetch) => {
+    const targetUrl = typeof urlToFetch === 'string' ? urlToFetch.trim() : externalUrl.trim();
+    if (!targetUrl) return alert('GitHub 프로젝트 또는 리포지토리 URL을 입력해주세요.');
     try {
       setIsFetchingExternal(true);
       setDisplayedRepos([]);
       setSelectedRepoUrl('');
 
       const response = await axios.post('http://3.39.190.222:5000/api/github/owner-repos', {
-        owner_url: externalUrl.trim()
+        owner_url: targetUrl
       });
 
       if (response.data && response.data.repos) {
@@ -136,6 +151,14 @@ const MainPage = () => {
         if (autoSelected) {
           setSelectedRepoUrl(autoSelected.url);
         }
+        setSearchQuery('');
+        setExternalUrl(targetUrl); // 입력창 동기화
+        
+        // 최근 검색 기록 업데이트 (중복 제거 및 최상단 배치, 최대 5개 유지)
+        setExternalHistory(prev => {
+          const newHistory = [targetUrl, ...prev.filter(url => url !== targetUrl)];
+          return newHistory.slice(0, 5);
+        });
       }
     } catch (error) {
       console.error("외부 리포지토리 목록을 가져오는데 실패했습니다:", error);
@@ -158,6 +181,7 @@ const MainPage = () => {
     setExternalUrl('');
     setDisplayedRepos([]);
     setSelectedRepoUrl('');
+    setSearchQuery('');
     // 분석 기록(history)은 초기화하지 않고 유지합니다.
     // 전체 삭제(clear) 대신 인증 및 유저 정보만 선택적으로 삭제합니다.
     localStorage.removeItem('user_id');
@@ -175,17 +199,9 @@ const MainPage = () => {
     e.stopPropagation(); // 부모 div의 클릭 이벤트(페이지 이동)가 발생하지 않도록 방지
     if (window.confirm('이 분석 기록을 삭제하시겠습니까?')) {
       setHistory(prevHistory => prevHistory.filter(item => {
-        // 삭제할 기록의 스냅샷 데이터(로컬 스토리지)도 함께 정리합니다.
-        if (item.id && id) {
-          if (item.id === id) {
-            localStorage.removeItem(`snapshot_${id}`);
-            return false;
-          }
-          return true;
-        }
-        const isMatch = item.url === url && item.date === date;
-        if (isMatch && item.id) localStorage.removeItem(`snapshot_${item.id}`);
-        return !isMatch;
+        // 고유 ID가 있으면 ID로 비교하고, 없으면(기존 데이터) URL과 날짜 조합으로 비교하여 삭제합니다.
+        if (item.id && id) return item.id !== id;
+        return !(item.url === url && item.date === date);
       }));
     }
   };
@@ -199,6 +215,15 @@ const MainPage = () => {
     // 분석 기록 저장은 LoadingPage에서 완료 시점에 처리되므로 여기서는 제거합니다.
     goToAnalysis(selectedRepoUrl);
   };
+
+  // 검색 필터링 적용된 리포지토리 목록
+  const filteredRepos = useMemo(() => {
+    if (!searchQuery) return displayedRepos;
+    return displayedRepos.filter(repo =>
+      (repo.repo_name || repo.name).toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (repo.description && repo.description.toLowerCase().includes(searchQuery.toLowerCase()))
+    );
+  }, [displayedRepos, searchQuery]);
 
   return (
     <div className="main-container" style={{ minHeight: '100vh', backgroundColor: '#f9fafb', padding: '40px 20px', fontFamily: '"Inter", sans-serif' }}>
@@ -246,26 +271,91 @@ const MainPage = () => {
                     <div>
                       <label style={{ display: 'block', marginBottom: '8px', fontWeight: '600', color: '#334155' }}>외부 public 프로젝트 URL</label>
                       <div style={{ display: 'flex', gap: '10px' }}>
-                        <input type="text" placeholder="https://github.com/owner 또는 owner/repo" value={externalUrl} onChange={(e) => setExternalUrl(e.target.value)} style={{ flex: 1, padding: '12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '1rem', outline: 'none' }} />
-                        <button onClick={handleFetchExternalRepos} disabled={isFetchingExternal} style={{ padding: '12px 20px', backgroundColor: '#1e293b', color: 'white', border: 'none', borderRadius: '8px', fontSize: '0.95rem', fontWeight: '600', cursor: isFetchingExternal ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}>
+                        <input type="text" placeholder="https://github.com/owner 또는 owner/repo" value={externalUrl} onChange={(e) => setExternalUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleFetchExternalRepos(externalUrl)} style={{ flex: 1, padding: '12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '1rem', outline: 'none' }} />
+                        <button onClick={() => handleFetchExternalRepos(externalUrl)} disabled={isFetchingExternal} style={{ padding: '12px 20px', backgroundColor: '#1e293b', color: 'white', border: 'none', borderRadius: '8px', fontSize: '0.95rem', fontWeight: '600', cursor: isFetchingExternal ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}>
                           {isFetchingExternal ? '불러오는 중...' : '리포지토리 불러오기'}
                         </button>
                       </div>
+                      
+                      {externalHistory.length > 0 && (
+                        <div style={{ marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                          <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: '600' }}>최근 검색:</span>
+                          {externalHistory.map((url, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => handleFetchExternalRepos(url)}
+                              style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', border: '1px solid #cbd5e1', borderRadius: '12px', fontSize: '0.8rem', cursor: 'pointer', transition: 'all 0.2s' }}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#e2e8f0'}
+                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#f1f5f9'}
+                            >
+                              {url}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
 
                 <div style={{ paddingTop: '20px', borderTop: '1px solid #f1f5f9' }}>
-                  <label style={{ display: 'block', marginBottom: '8px', fontWeight: '600', color: '#334155' }}>연결된 GitHub 리포지토리</label>
-                  <div style={{ display: 'flex', gap: '10px' }}>
-                    <select value={selectedRepoUrl} onChange={(e) => setSelectedRepoUrl(e.target.value)} style={{ flex: 1, padding: '12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '1rem', outline: 'none' }}>
-                      <option value="">-- 분석할 리포지토리 선택 --</option>
-                      {displayedRepos.map((repo, idx) => (
-                        <option key={idx} value={repo.url}>{repo.repo_name || repo.name}</option>
-                      ))}
-                    </select>
-                    <button onClick={handleStartAnalysis} style={{ padding: '12px 30px', backgroundColor: '#4f46e5', color: 'white', border: 'none', borderRadius: '8px', fontSize: '1rem', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap' }}>
-                      분석 시작
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <label style={{ margin: 0, fontWeight: '600', color: '#334155' }}>연결된 GitHub 리포지토리 ({filteredRepos.length})</label>
+                    <input type="text" placeholder="리포지토리 검색..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ padding: '8px 12px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.9rem', outline: 'none', width: '200px' }} />
+                  </div>
+                  
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px', maxHeight: '280px', overflowY: 'auto', padding: '4px' }}>
+                    {filteredRepos.length > 0 ? filteredRepos.map((repo, idx) => {
+                      // 현재 리포지토리 URL과 일치하는 분석 기록 찾기 (history는 최신순이므로 가장 첫 번째가 최근 기록)
+                      const lastAnalysis = history.find(h => h.url === repo.url);
+                      
+                      return (
+                        <div 
+                          key={idx} 
+                          onClick={() => setSelectedRepoUrl(repo.url)}
+                          style={{ 
+                            padding: '16px', 
+                            borderRadius: '10px', 
+                            border: selectedRepoUrl === repo.url ? '2px solid #4f46e5' : '1px solid #e2e8f0', 
+                            backgroundColor: selectedRepoUrl === repo.url ? '#eef2ff' : '#ffffff', 
+                            cursor: 'pointer', 
+                            transition: 'all 0.2s',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '8px'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+                            <strong style={{ color: '#1e293b', fontSize: '1rem', wordBreak: 'break-all', lineHeight: '1.3' }}>{repo.repo_name || repo.name}</strong>
+                            {repo.private && <span style={{ fontSize: '0.7rem', padding: '2px 6px', backgroundColor: '#e2e8f0', color: '#475569', borderRadius: '4px', fontWeight: 'bold' }}>Private</span>}
+                          </div>
+                          <p style={{ margin: 0, fontSize: '0.85rem', color: '#64748b', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', lineHeight: '1.4' }}>
+                            {repo.description || '설명이 없습니다.'}
+                          </p>
+                          <div style={{ marginTop: 'auto', paddingTop: '8px', borderTop: '1px dashed #e2e8f0', fontSize: '0.75rem', color: lastAnalysis ? '#4f46e5' : '#94a3b8', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            {lastAnalysis ? (
+                              <>
+                                <span style={{ display: 'inline-block', width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#4f46e5' }}></span>
+                                최근 분석: {lastAnalysis.date}
+                              </>
+                            ) : (
+                              <>
+                                <span style={{ display: 'inline-block', width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#cbd5e1' }}></span>
+                                분석 기록 없음
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    }) : (
+                      <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '30px', color: '#94a3b8', backgroundColor: '#f8fafc', borderRadius: '8px' }}>
+                        검색 결과가 없습니다.
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end' }}>
+                    <button onClick={handleStartAnalysis} disabled={!selectedRepoUrl} style={{ padding: '12px 30px', backgroundColor: selectedRepoUrl ? '#4f46e5' : '#94a3b8', color: 'white', border: 'none', borderRadius: '8px', fontSize: '1rem', fontWeight: '600', cursor: selectedRepoUrl ? 'pointer' : 'not-allowed', transition: 'background 0.2s', width: '100%' }}>
+                      선택한 프로젝트 분석 시작
                     </button>
                   </div>
                 </div>
@@ -284,51 +374,47 @@ const MainPage = () => {
         {isLoggedIn && history.length > 0 && (
           <div className="history-section" style={{ marginTop: '40px' }}>
             <h3 style={{ fontSize: '1.1rem', color: '#475569', marginBottom: '15px', fontWeight: '600' }}>최근 분석 기록</h3>
-            <div style={{ backgroundColor: '#ffffff', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '15px' }}>
               {history.map((item, idx) => (
                 <div 
                   key={item.id || idx} 
                   onClick={() => {
                     if (item.projectId) {
-                      navigate('/dashboard', { state: { projectId: item.projectId, repoUrl: item.url, historyId: item.id } });
+                      navigate('/dashboard', { state: { projectId: item.projectId, repoUrl: item.url } });
                     } else {
                       navigate('/loading', { state: { repoUrl: item.url } });
                     }
                   }}
                   style={{ 
-                    padding: '16px 20px', 
-                    borderBottom: idx === history.length - 1 ? 'none' : '1px solid #f1f5f9', 
+                    padding: '18px', 
+                    backgroundColor: '#ffffff', 
+                    borderRadius: '12px', 
+                    border: '1px solid #e2e8f0',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
                     cursor: 'pointer',
                     display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
+                    flexDirection: 'column',
+                    gap: '12px',
                     transition: 'background 0.2s'
                   }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f8fafc'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#ffffff'}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#cbd5e1'; e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 4px 6px rgba(0,0,0,0.08)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#e2e8f0'; e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.05)'; }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
-                    <span style={{ color: '#4f46e5', fontWeight: '600' }}>{item.name}</span>
-                    <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>{item.date}</span>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+                    <strong style={{ color: '#1e293b', fontSize: '1.05rem', wordBreak: 'break-all', lineHeight: '1.3' }}>{item.name}</strong>
+                    <button 
+                      onClick={(e) => handleDeleteHistory(e, item.id, item.url, item.date)}
+                      style={{ padding: '4px 8px', backgroundColor: '#f1f5f9', color: '#64748b', border: 'none', borderRadius: '4px', fontSize: '0.75rem', cursor: 'pointer', fontWeight: '600', transition: 'all 0.2s', whiteSpace: 'nowrap' }}
+                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#fee2e2'; e.currentTarget.style.color = '#b91c1c'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#f1f5f9'; e.currentTarget.style.color = '#64748b'; }}
+                    >
+                      기록 삭제
+                    </button>
                   </div>
-                  <button 
-                    onClick={(e) => handleDeleteHistory(e, item.id, item.url, item.date)}
-                    style={{ 
-                      padding: '6px 10px', 
-                      backgroundColor: 'transparent', 
-                      color: '#94a3b8', 
-                      border: 'none', 
-                      borderRadius: '4px', 
-                      fontSize: '0.8rem', 
-                      cursor: 'pointer',
-                      fontWeight: '500',
-                      transition: 'all 0.2s'
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#fee2e2'; e.currentTarget.style.color = '#b91c1c'; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.color = '#94a3b8'; }}
-                  >
-                    삭제
-                  </button>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <span style={{ fontSize: '0.85rem', color: '#64748b', wordBreak: 'break-all' }}>{item.url.replace('https://github.com/', '')}</span>
+                    <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>{item.date}</span>
+                  </div>
                 </div>
               ))}
             </div>
