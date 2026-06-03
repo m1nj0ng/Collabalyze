@@ -83,7 +83,8 @@ GITHUB_RATE_LIMIT_BUFFER = int(os.getenv("GITHUB_RATE_LIMIT_BUFFER", "10"))
 
 # GitHub 프로젝트/조직 주소 기반 리포지토리 목록 조회용 설정
 GITHUB_API_BASE_URL = "https://api.github.com"
-GITHUB_OWNER_REPO_LIST_LIMIT = 50
+
+GITHUB_REPO_LIST_PER_PAGE = 100
 
 # GitHub 데이터 수집 성능 설정
 ENABLE_LIZARD_ANALYSIS = os.getenv("ENABLE_LIZARD_ANALYSIS", "false").lower() == "true"
@@ -3030,12 +3031,15 @@ def get_github_owner_repos():
     selected_repo_name = parsed_input["selected_repo_name"]
     input_type = parsed_input["input_type"]
 
-    try:
-        requested_limit = int(data.get("limit", GITHUB_OWNER_REPO_LIST_LIMIT))
-    except (TypeError, ValueError):
-        requested_limit = GITHUB_OWNER_REPO_LIST_LIMIT
+    requested_limit = None
 
-    limit = min(max(requested_limit, 1), GITHUB_OWNER_REPO_LIST_LIMIT)
+    if data.get("limit") is not None:
+        try:
+            requested_limit = int(data.get("limit"))
+            if requested_limit < 1:
+                requested_limit = None
+        except (TypeError, ValueError):
+            requested_limit = None
 
     headers = build_github_api_headers()
 
@@ -3054,36 +3058,64 @@ def get_github_owner_repos():
 
     if owner_type == "Organization":
         repos_api_url = f"{GITHUB_API_BASE_URL}/orgs/{owner}/repos"
-        repo_params = {
+        base_repo_params = {
             "type": "public",
             "sort": "updated",
-            "direction": "desc",
-            "per_page": limit,
-            "page": 1
+            "direction": "desc"
         }
     else:
         repos_api_url = f"{GITHUB_API_BASE_URL}/users/{owner}/repos"
-        repo_params = {
+        base_repo_params = {
             "sort": "updated",
-            "direction": "desc",
-            "per_page": limit,
-            "page": 1
+            "direction": "desc"
         }
 
-    repos_response = requests.get(
-        repos_api_url,
-        headers=headers,
-        params=repo_params,
-        timeout=10
-    )
+    repo_items = []
+    page = 1
 
-    if repos_response.status_code != 200:
-        return github_error_response(repos_response, "GitHub repository 목록 조회에 실패했습니다.")
+    while True:
+        if requested_limit is not None:
+            remaining_to_fetch = requested_limit - len(repo_items)
+            if remaining_to_fetch <= 0:
+                break
 
-    repo_items = [
-        build_repo_list_item(repo, selected_repo_name=selected_repo_name)
-        for repo in repos_response.json()
-    ]
+            per_page = min(GITHUB_REPO_LIST_PER_PAGE, remaining_to_fetch)
+        else:
+            per_page = GITHUB_REPO_LIST_PER_PAGE
+
+        repo_params = {
+            **base_repo_params,
+            "per_page": per_page,
+            "page": page
+        }
+
+        repos_response = requests.get(
+            repos_api_url,
+            headers=headers,
+            params=repo_params,
+            timeout=10
+        )
+
+        if repos_response.status_code != 200:
+            return github_error_response(repos_response, "GitHub repository 목록 조회에 실패했습니다.")
+
+        repos_page = repos_response.json()
+
+        if not repos_page:
+            break
+
+        repo_items.extend([
+            build_repo_list_item(repo, selected_repo_name=selected_repo_name)
+            for repo in repos_page
+        ])
+
+        if len(repos_page) < per_page:
+            break
+
+        if total_count and len(repo_items) >= total_count:
+            break
+
+        page += 1
 
     selected_repo_url = None
 
@@ -3121,7 +3153,9 @@ def get_github_owner_repos():
 
             # 선택 repo를 맨 위에 두고, 최대 limit 개수는 유지
             repo_items = [selected_repo_item] + repo_items
-            repo_items = repo_items[:limit]
+
+            if requested_limit is not None:
+                repo_items = repo_items[:requested_limit]
 
         # selected repo가 화면에서 바로 보이도록 맨 위로 정렬
         repo_items.sort(key=lambda item: not item.get("selected", False))
@@ -3134,10 +3168,10 @@ def get_github_owner_repos():
         "owner_url": f"https://github.com/{owner}",
         "selected_repo_name": selected_repo_name,
         "selected_repo_url": selected_repo_url,
-        "limit": limit,
+        "limit": requested_limit,
         "total_count": total_count,
         "returned_count": len(repo_items),
-        "truncated": total_count > len(repo_items),
+        "truncated": requested_limit is not None and total_count > len(repo_items),
         "repos": repo_items
     })
 
