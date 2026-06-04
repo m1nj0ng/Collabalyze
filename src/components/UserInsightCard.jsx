@@ -21,7 +21,6 @@ const UserInsightCard = ({ member }) => (
           {member.role || '팀원'}
         </span>
       </h2>
-      
       <div style={{ display: 'flex', gap: '15px', marginTop: '15px', flexWrap: 'wrap' }}>
         <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
           <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>기여 점수</div>

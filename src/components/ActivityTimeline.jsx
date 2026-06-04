@@ -39,18 +39,24 @@ const ActivityTimeline = ({ timelineData }) => {
           </button>
         ))}
       </div>
-      <div style={{ width: '100%', height: 220 }}>
-        {data.length > 0 ? (
-          <ResponsiveContainer>
-            <LineChart data={data}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-              <XAxis dataKey="date" tick={{ fontSize: 12, fill: '#64748b' }} axisLine={{ stroke: '#cbd5e1' }} tickLine={false} />
-              <YAxis tick={{ fontSize: 12, fill: '#64748b' }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
-              <Line type="monotone" dataKey="commits" stroke="#4f46e5" strokeWidth={3} dot={{ r: 4, fill: '#4f46e5', strokeWidth: 0 }} activeDot={{ r: 6, stroke: '#c7d2fe', strokeWidth: 4 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        ) : (
+      <div style={{ width: '100%', height: 280 }}>
+          {data.length > 0 ? (
+            <ResponsiveContainer>
+              <LineChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                <XAxis 
+                  dataKey="date" 
+                  tick={{ fontSize: 12, fill: '#64748b' }} 
+                  axisLine={{ stroke: '#cbd5e1' }} 
+                  tickLine={false} 
+                  minTickGap={30} // 텍스트가 겹치지 않게 일정한 간격으로 규칙적으로 표시
+                />
+                <YAxis tick={{ fontSize: 12, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                <Line type="monotone" dataKey="commits" stroke="#4f46e5" strokeWidth={3} dot={{ r: 4, fill: '#4f46e5', strokeWidth: 0 }} activeDot={{ r: 6, stroke: '#c7d2fe', strokeWidth: 4 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
           <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '0.95rem', fontWeight: '500', backgroundColor: '#f8fafc', borderRadius: '8px' }}>
             해당 기간의 활동 데이터가 없습니다.
           </div>

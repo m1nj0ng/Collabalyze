@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Legend,
@@ -110,6 +110,16 @@ const ComparePage = () => {
     return merged;
   }, [m1, m2]);
 
+  const timelineScrollRef = useRef(null);
+  const currentTimelineData = mergedTimelineData[timeUnit] || [];
+
+  // 데이터나 시간 단위가 변경될 때 가장 최근 데이터(오른쪽 끝)로 자동 스크롤
+  useEffect(() => {
+    if (timelineScrollRef.current) {
+      timelineScrollRef.current.scrollLeft = timelineScrollRef.current.scrollWidth;
+    }
+  }, [currentTimelineData, timeUnit]);
+
   // 카드 컴포넌트 분리
   const MemberCard = ({ member, color }) => {
     const p = getMemberPersona(member);
@@ -187,19 +197,19 @@ const ComparePage = () => {
                  ))}
                </div>
             </div>
-            <div style={{ width: '100%', height: '300px' }}>
-              <ResponsiveContainer>
-                <LineChart data={mergedTimelineData[timeUnit]}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: '#64748b' }} axisLine={{ stroke: '#cbd5e1' }} tickLine={false} />
-                  <YAxis tick={{ fontSize: 12, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                  <RechartsTooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
-                  <Legend verticalAlign="top" height={30} iconType="circle" />
-                  <Line type="monotone" dataKey={m1.name} stroke={COLORS[0]} strokeWidth={3} dot={{ r: 4, fill: COLORS[0], strokeWidth: 0 }} />
-                  <Line type="monotone" dataKey={m2.name} stroke={COLORS[1]} strokeWidth={3} dot={{ r: 4, fill: COLORS[1], strokeWidth: 0 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+      <div style={{ width: '100%', height: '350px' }}>
+                <ResponsiveContainer>
+                <LineChart data={currentTimelineData} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: '#64748b' }} axisLine={{ stroke: '#cbd5e1' }} tickLine={false} minTickGap={30} />
+                    <YAxis tick={{ fontSize: 12, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                    <RechartsTooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                    <Legend verticalAlign="top" height={30} iconType="circle" />
+                    <Line type="monotone" dataKey={m1.name} stroke={COLORS[0]} strokeWidth={3} dot={{ r: 4, fill: COLORS[0], strokeWidth: 0 }} />
+                    <Line type="monotone" dataKey={m2.name} stroke={COLORS[1]} strokeWidth={3} dot={{ r: 4, fill: COLORS[1], strokeWidth: 0 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+          </div>
           </div>
 
         </div>

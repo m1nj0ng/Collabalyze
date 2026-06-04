@@ -97,6 +97,15 @@ const CollaborationGraph = ({ data }) => {
       });
     });
     
+    // 양방향 통신이 있는 경우, 선이 서로 겹치지 않도록 곡률(curvature)을 줍니다.
+    newLinks.forEach(link => {
+      const hasReverse = newLinks.find(l => 
+        l.source.toLowerCase() === link.target.toLowerCase() && 
+        l.target.toLowerCase() === link.source.toLowerCase()
+      );
+      link.curvature = hasReverse ? 0.15 : 0;
+    });
+    
     setNodes(newNodes);
     setLinks(newLinks);
   }, [data]);
@@ -159,6 +168,7 @@ const CollaborationGraph = ({ data }) => {
         // 링크 설정
         linkWidth={link => Math.max(1, (link.value || 1) * 1.5)}
         linkColor={() => 'rgba(100, 116, 139, 0.5)'}
+        linkCurvature={link => link.curvature || 0}
         linkDirectionalArrowLength={5}
         linkDirectionalArrowRelPos={1}
         // 툴팁 설정
