@@ -3214,7 +3214,7 @@ def register_project():
         return jsonify({"error": "repo_url 데이터가 누락되었습니다."}), 400
 
     repo_url = repo_url.strip().rstrip("/")
-    
+
     name = repo_url.replace("https://github.com/", "").strip("/")
 
     # 3. 데이터베이스 조회하여 중복 등록 방지
@@ -4344,6 +4344,8 @@ def get_project_contributions(project_id):
     if not project:
         return jsonify({"error": "해당 프로젝트를 찾을 수 없습니다."}), 404
 
+    compact = request.args.get("compact", "false").lower() in ("true", "1", "yes")
+    
     contributions = (
         ContributionData.query
         .options(joinedload(ContributionData.user))
@@ -4452,30 +4454,38 @@ def get_project_contributions(project_id):
         prs = prs_by_user[user_id]
         pr_data_list = []
         for pr in prs:
-            pr_data_list.append({
+            pr_item = {
                 "pr_number": pr.pr_number,
                 "title": pr.title,
-                "body": pr.body if pr.body else "",
-                "comments": pr.comments.split('\n') if pr.comments else [],
                 "state": pr.state,
                 "date": pr.created_at.strftime("%Y-%m-%d %H:%M:%S") if pr.created_at else None,
                 "merged_by": pr.merged_by,
                 "pr_summary": pr.pr_summary
-            })
+            }
+
+            if not compact:
+                pr_item["body"] = pr.body if pr.body else ""
+                pr_item["comments"] = pr.comments.split('\n') if pr.comments else []
+
+            pr_data_list.append(pr_item)
 
         # [데이터 3] 이슈 내역 (제목, 본문, 댓글, 상태, 날짜)
         issues = issues_by_user[user_id]
         issue_data_list = []
         for issue in issues:
-            issue_data_list.append({
+            issue_item = {
                 "issue_number": issue.issue_number,
                 "title": issue.title,
-                "body": issue.body if issue.body else "",
-                "comments": issue.comments.split('\n') if issue.comments else [],
                 "state": issue.state,
                 "date": issue.created_at.strftime("%Y-%m-%d %H:%M:%S") if issue.created_at else None,
                 "issue_summary": issue.issue_summary
-            })
+            }
+
+            if not compact:
+                issue_item["body"] = issue.body if issue.body else ""
+                issue_item["comments"] = issue.comments.split('\n') if issue.comments else []
+
+            issue_data_list.append(issue_item)
 
         user_data = {
             "username": c.user.github_id,
@@ -4520,6 +4530,7 @@ def get_project_contributions(project_id):
         "status": "success",
         "project_name": project.name,
         "total_contributors": len(result),
+        "compact": compact,
         "data": result
     })
 
