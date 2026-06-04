@@ -14,6 +14,7 @@ import json
 from urllib.parse import urlencode, urlparse, unquote
 from collections import defaultdict
 from sqlalchemy.orm import joinedload
+from sqlalchemy.exc import IntegrityError
 
 # 환경 변수 로드
 load_dotenv()
@@ -3192,35 +3193,73 @@ def get_github_owner_repos():
 def register_project():
     # 1. 클라이언트(프론트엔드)로부터 JSON 데이터 수신
     data = request.get_json(silent=True) or {}
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON 객체 형식으로 요청해야 합니다."}), 400
+
     repo_url = data.get('repo_url')
 
     if not isinstance(repo_url, str) or not repo_url.strip():
         return jsonify({"error": "repo_url 데이터가 누락되었습니다."}), 400
 
-    repo_url = repo_url.strip()
+    repo_url = repo_url.strip().rstrip("/")
+
+    if repo_url.endswith(".git"):
+        repo_url = repo_url[:-4]
 
     # 2. URL에서 레포지토리 이름(owner/repo) 추출 
-    # 예: https://github.com/m1nj0ng/Collabalyze -> m1nj0ng/Collabalyze
-    name = repo_url.replace("https://github.com/", "").replace(".git", "")
+    # 예: https://github.com_url = data.get('repo_url')
+
+    if not isinstance(repo_url, str) or not repo_url.strip():
+        return jsonify({"error": "repo_url 데이터가 누락되었습니다."}), 400
+
+    repo_url = repo_url.strip().rstrip("/")
+    
+    name = repo_url.replace("https://github.com/", "").strip("/")
 
     # 3. 데이터베이스 조회하여 중복 등록 방지
     project = Project.query.filter_by(repo_url=repo_url).first()
     
-    # 4. 신규 프로젝트인 경우 DB에 저장
-    if not project:
+    # 4. 이미 등록된 프로젝트인 경우 기존 프로젝트 반환
+    if project:
+        return jsonify({
+            "status": "success",
+            "message": "이미 등록된 프로젝트입니다.",
+            "project_id": project.id,
+            "project_name": project.name,
+            "repo_url": project.repo_url,
+            "created": False
+        })
+
+    # 5. 신규 프로젝트인 경우 DB에 저장
+    try:
         project = Project(repo_url=repo_url, name=name)
         db.session.add(project)
         db.session.commit()
-        message = "프로젝트가 성공적으로 등록되었습니다."
-    else:
-        message = "이미 등록된 프로젝트입니다."
 
-    # 5. 등록 결과 반환
+        message = "프로젝트가 성공적으로 등록되었습니다."
+        created = True
+
+    except IntegrityError:
+        db.session.rollback()
+
+        # 동시에 같은 repo_url 등록 요청이 들어온 경우 기존 프로젝트를 다시 조회
+        project = Project.query.filter_by(repo_url=repo_url).first()
+
+        if not project:
+            return jsonify({"error": "프로젝트 등록 중 중복 오류가 발생했습니다."}), 500
+
+        message = "이미 등록된 프로젝트입니다."
+        created = False
+
+    # 6. 등록 결과 반환
     return jsonify({
         "status": "success",
         "message": message,
         "project_id": project.id,
-        "project_name": project.name
+        "project_name": project.name,
+        "repo_url": project.repo_url,
+        "created": created
     })
 
 # ==========================================
