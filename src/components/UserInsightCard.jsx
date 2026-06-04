@@ -21,26 +21,41 @@ const UserInsightCard = ({ member }) => (
           {member.role || '팀원'}
         </span>
       </h2>
-      <div style={{ display: 'flex', gap: '15px', marginTop: '15px', flexWrap: 'wrap' }}>
-        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
-          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>기여 점수</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#4f46e5' }}>{member.score || 0}점</div>
+      <div style={{ display: 'flex', gap: '10px', marginTop: '15px', flexWrap: 'wrap' }}>
+        <div style={{ padding: '12px 16px', backgroundColor: '#eef2ff', borderRadius: '10px', border: '1px solid #c7d2fe', flex: '1 1 auto', minWidth: '110px' }}>
+          <div style={{ fontSize: '0.75rem', color: '#4f46e5', fontWeight: '700', marginBottom: '4px' }}>종합 기여</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: '800', color: '#312e81' }}>{member.score || 0}</div>
         </div>
-        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
-          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>Commits</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1e293b' }}>{member.commitsCount || 0}</div>
+        <div style={{ padding: '12px 16px', backgroundColor: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', flex: '1 1 auto', minWidth: '110px' }}>
+          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: '600', marginBottom: '4px' }}>활동 정량</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: '800', color: '#1e293b' }}>{member.quantitativeScore || 0}</div>
         </div>
-        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
-          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>PRs</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1e293b' }}>{member.prCount || 0}</div>
+        <div style={{ padding: '12px 16px', backgroundColor: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', flex: '1 1 auto', minWidth: '110px' }}>
+          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: '600', marginBottom: '4px' }}>협업 소통</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: '800', color: '#1e293b' }}>{member.collaborationScore || 0}</div>
         </div>
-        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
-          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>Reviews</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1e293b' }}>{member.reviewsCount || 0}</div>
+        <div style={{ padding: '12px 16px', backgroundColor: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', flex: '1 1 auto', minWidth: '110px' }}>
+          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: '600', marginBottom: '4px' }}>코드 품질</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: '800', color: '#1e293b' }}>{member.backendCodeScore !== null && member.backendCodeScore !== undefined ? member.backendCodeScore : 'N/A'}</div>
         </div>
-        <div style={{ padding: '10px 15px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
-          <div style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: '600' }}>Issues</div>
-          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#1e293b' }}>{member.issuesCount || 0}</div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '10px', marginTop: '10px', flexWrap: 'wrap' }}>
+        <div style={{ padding: '12px 16px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9', flex: '1 1 auto', minWidth: '110px', textAlign: 'center' }}>
+          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: '600', marginBottom: '4px' }}>Commits</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: '800', color: '#1e293b' }}>{member.commitsCount || 0}</div>
+        </div>
+        <div style={{ padding: '12px 16px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9', flex: '1 1 auto', minWidth: '110px', textAlign: 'center' }}>
+          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: '600', marginBottom: '4px' }}>PRs</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: '800', color: '#1e293b' }}>{member.prCount || 0}</div>
+        </div>
+        <div style={{ padding: '12px 16px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9', flex: '1 1 auto', minWidth: '110px', textAlign: 'center' }}>
+          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: '600', marginBottom: '4px' }}>Reviews</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: '800', color: '#1e293b' }}>{member.reviewsCount || 0}</div>
+        </div>
+        <div style={{ padding: '12px 16px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9', flex: '1 1 auto', minWidth: '110px', textAlign: 'center' }}>
+          <div style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: '600', marginBottom: '4px' }}>Issues</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: '800', color: '#1e293b' }}>{member.issuesCount || 0}</div>
         </div>
       </div>
       

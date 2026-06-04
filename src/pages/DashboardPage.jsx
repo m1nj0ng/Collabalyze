@@ -55,7 +55,7 @@ const DashboardPage = () => {
           }
         }
 
-        const response = await axios.get(`http://3.39.190.222:5000/api/projects/${projectId}/contributions`);
+        const response = await axios.get(`http://3.39.190.222:5000/api/projects/${projectId}/contributions?compact=true`);
         
         // 응답 데이터가 배열 형태(data)로 온다고 가정
         let apiData = response.data?.data || response.data;
@@ -81,7 +81,9 @@ const DashboardPage = () => {
             
             // 2. 점수 데이터 (분석 전 null 대비)
             score: Number(item.final_score) || 0,
-            backendCodeScore: staticCode.backend_code_score || null,
+            quantitativeScore: Number(quant.quantitative_score) || 0,
+            collaborationScore: Number(nlp.qualitative_score) || 0,
+            backendCodeScore: staticCode.backend_code_score !== undefined && staticCode.backend_code_score !== null ? Number(staticCode.backend_code_score) : null,
             
             // 3. NLP 및 요약 데이터 (null 필터링 적용)
             collabNetwork: nlp.collab_network || [],

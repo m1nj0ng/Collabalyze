@@ -24,7 +24,7 @@ const CollaborationGraph = ({ data }) => {
       id: member.id,
       name: member.name || member.id,
       color: colors[index % colors.length],
-      collaborationScore: member.score || 70, // 점수가 없으면 기본 크기를 위해 70 부여
+      collaborationScore: member.collaborationScore || 70, // 점수가 없으면 기본 크기를 위해 70 부여
     }));
 
     // 2. 링크(연결선) 생성
@@ -166,7 +166,7 @@ const CollaborationGraph = ({ data }) => {
         nodeCanvasObject={nodeCanvasObject}
         nodeLabel={node => `${node.name}: 협업 점수 ${node.collaborationScore}점`}
         // 링크 설정
-        linkWidth={link => Math.max(1, (link.value || 1) * 1.5)}
+        linkWidth={link => Math.max(1, Math.min(8, Math.sqrt(link.value || 1) * 1.5))}
         linkColor={() => 'rgba(100, 116, 139, 0.5)'}
         linkCurvature={link => link.curvature || 0}
         linkDirectionalArrowLength={5}

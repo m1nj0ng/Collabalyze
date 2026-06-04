@@ -13,35 +13,31 @@ const FilteredActivityList = ({ logs }) => {
       let text = typeof item === 'string' ? item : item.text;
       let date = typeof item === 'object' && item.date ? item.date : null;
       
-      let dateStr = '';
+      let dateObj = new Date();
       if (date) {
         const d = new Date(date);
         if (!isNaN(d.getTime())) {
-          dateStr = `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-        } else {
-          dateStr = String(date);
+          dateObj = d;
         }
       } else {
-        const d = new Date();
-        d.setDate(d.getDate() - index * 2);
-        d.setHours(14 - index, 30, 0);
-        dateStr = `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+        dateObj.setDate(dateObj.getDate() - index * 2);
+        dateObj.setHours(14 - index, 30, 0);
       }
-      return { type, text, date: dateStr, color, bg };
+      
+      const dateStr = `${dateObj.getFullYear()}.${String(dateObj.getMonth() + 1).padStart(2, '0')}.${String(dateObj.getDate()).padStart(2, '0')} ${String(dateObj.getHours()).padStart(2, '0')}:${String(dateObj.getMinutes()).padStart(2, '0')}`;
+      
+      return { type, text, date: dateStr, dateObj, color, bg };
     };
 
     const prs = (logs?.pullRequests || []).map((item, i) => formatItem(item, 'PR', '#10b981', '#d1fae5', i));
     const issues = (logs?.issues || []).map((item, i) => formatItem(item, 'Issue', '#ef4444', '#fee2e2', i));
     const commits = (logs?.commits || []).map((item, i) => formatItem(item, 'Commit', '#4f46e5', '#eef2ff', i));
     
-    // 시간별로 진행된 것처럼 보이도록 각 항목을 하나씩 교차로 섞어 배열 완성 (Mock Data 시각적 처리)
-    const maxLength = Math.max(prs.length, issues.length, commits.length);
-    const combined = [];
-    for (let i = 0; i < maxLength; i++) {
-      if (prs[i]) combined.push(prs[i]);
-      if (issues[i]) combined.push(issues[i]);
-      if (commits[i]) combined.push(commits[i]);
-    }
+    const combined = [...commits, ...prs, ...issues];
+    
+    // 실제 날짜(최신순)를 기준으로 통합 정렬
+    combined.sort((a, b) => b.dateObj.getTime() - a.dateObj.getTime());
+    
     return combined;
   }, [logs]);
 
@@ -52,7 +48,7 @@ const FilteredActivityList = ({ logs }) => {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#1e293b' }}>상세 활동 내역 (통합 타임라인)</h3>
         <div style={{ display: 'flex', gap: '8px' }}>
-          {['All', 'PR', 'Issue', 'Commit'].map(f => (
+          {['All', 'Commit', 'PR', 'Issue'].map(f => (
             <button 
               key={f} 
               onClick={() => setFilter(f)}
@@ -78,14 +74,18 @@ const FilteredActivityList = ({ logs }) => {
         {filteredActivities.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {filteredActivities.map((item, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', padding: '14px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9' }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', flex: 1, minWidth: 0 }}>
-                  <span style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: item.bg, color: item.color, fontSize: '0.75rem', fontWeight: 'bold', minWidth: '55px', textAlign: 'center', marginTop: '2px', flexShrink: 0 }}>
+              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '15px', padding: '14px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', flexShrink: 0, width: '70px' }}>
+                  <span style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: item.bg, color: item.color, fontSize: '0.75rem', fontWeight: 'bold', width: '100%', boxSizing: 'border-box', textAlign: 'center' }}>
                     {item.type}
                   </span>
-                  <span style={{ color: '#334155', fontSize: '0.95rem', lineHeight: '1.5', wordBreak: 'break-word', marginTop: '1px' }}>{item.text}</span>
+                  <span style={{ color: '#94a3b8', fontSize: '0.7rem', textAlign: 'center', lineHeight: '1.3', letterSpacing: '-0.02em' }}>
+                    {item.date.split(' ')[0]}<br/>{item.date.split(' ')[1]}
+                  </span>
                 </div>
-                <span style={{ color: '#94a3b8', fontSize: '0.85rem', whiteSpace: 'nowrap', flexShrink: 0, marginTop: '2px', textAlign: 'right' }}>{item.date}</span>
+                <div style={{ flex: 1, minWidth: 0, textAlign: 'left', marginTop: '2px' }}>
+                  <span style={{ color: '#334155', fontSize: '0.95rem', lineHeight: '1.5', wordBreak: 'break-word' }}>{item.text}</span>
+                </div>
               </div>
             ))}
           </div>
@@ -440,6 +440,9 @@ const DetailPage = () => {
     
     // 본인 기여도 표시 (실제 데이터 우선)
     score: realMember ? realMember.score : baseMember.contributionScore,
+    quantitativeScore: realMember ? realMember.quantitativeScore : 85,
+    collaborationScore: realMember ? realMember.collaborationScore : 90,
+    backendCodeScore: realMember ? realMember.backendCodeScore : 88,
     commitsCount: realMember ? realMember.commits : 0,
     prCount: realMember ? realMember.pullRequests : 0,
     reviewsCount: realMember ? realMember.reviews : 0,

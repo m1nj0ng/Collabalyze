@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Legend,
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Brush
 } from 'recharts';
 
 const ComparePage = () => {
@@ -197,19 +197,28 @@ const ComparePage = () => {
                  ))}
                </div>
             </div>
-      <div style={{ width: '100%', height: '350px' }}>
-                <ResponsiveContainer>
-                <LineChart data={currentTimelineData} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="date" tick={{ fontSize: 12, fill: '#64748b' }} axisLine={{ stroke: '#cbd5e1' }} tickLine={false} minTickGap={30} />
-                    <YAxis tick={{ fontSize: 12, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                    <RechartsTooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
-                    <Legend verticalAlign="top" height={30} iconType="circle" />
-                    <Line type="monotone" dataKey={m1.name} stroke={COLORS[0]} strokeWidth={3} dot={{ r: 4, fill: COLORS[0], strokeWidth: 0 }} />
-                    <Line type="monotone" dataKey={m2.name} stroke={COLORS[1]} strokeWidth={3} dot={{ r: 4, fill: COLORS[1], strokeWidth: 0 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-          </div>
+          <div style={{ width: '100%', height: '350px' }}>
+              <ResponsiveContainer>
+              <LineChart data={mergedTimelineData[timeUnit]} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                <XAxis dataKey="date" tick={{ fontSize: 12, fill: '#64748b' }} axisLine={{ stroke: '#cbd5e1' }} tickLine={false} minTickGap={30} />
+                  <YAxis tick={{ fontSize: 12, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                  <RechartsTooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
+                  <Legend verticalAlign="top" height={30} iconType="circle" />
+                  <Line type="monotone" dataKey={m1.name} stroke={COLORS[0]} strokeWidth={3} dot={{ r: 4, fill: COLORS[0], strokeWidth: 0 }} />
+                  <Line type="monotone" dataKey={m2.name} stroke={COLORS[1]} strokeWidth={3} dot={{ r: 4, fill: COLORS[1], strokeWidth: 0 }} />
+                <Brush 
+                  dataKey="date" 
+                  height={20} 
+                  stroke="#a5b4fc" 
+                  fill="#f1f5f9" 
+                  travellerWidth={8} 
+                  startIndex={Math.max(0, (mergedTimelineData[timeUnit]?.length || 0) - 14)}
+                  tickFormatter={() => ''} // 브러시 내부 텍스트 숨김
+                />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
           </div>
 
         </div>

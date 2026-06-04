@@ -86,13 +86,13 @@ const LoadingPage = () => {
           };
 
           const newHistoryList = [newHistoryItem, ...savedHistory];
-          // 10개를 초과하는 오래된 기록의 스냅샷 캐시 데이터 삭제
-          if (newHistoryList.length > 10) {
-            const removedItems = newHistoryList.slice(10);
+          // 30개를 초과하는 오래된 기록의 스냅샷 캐시 데이터 삭제
+          if (newHistoryList.length > 30) {
+            const removedItems = newHistoryList.slice(30);
             removedItems.forEach(item => localStorage.removeItem(`snapshot_${item.id}`));
           }
           
-          localStorage.setItem('analysisHistory', JSON.stringify(newHistoryList.slice(0, 10)));
+          localStorage.setItem('analysisHistory', JSON.stringify(newHistoryList.slice(0, 30)));
 
           if (isMounted) {
             navigate('/dashboard', { state: { projectId, repoUrl, historyId: newHistoryId } });
