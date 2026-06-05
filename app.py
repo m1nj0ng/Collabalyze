@@ -1751,6 +1751,72 @@ def infer_large_diff_topic(commit, changed_files):
 
     return None
 
+def build_message_based_summary(message_title):
+    """Diff가 없거나 제한적일 때 커밋 메시지를 사용자용 요약 문장으로 정리"""
+    title = (message_title or "").strip()
+
+    if not title:
+        return None
+
+    title = title.replace("\r", " ").replace("\n", " ").strip()
+    title = title.rstrip(".。")
+
+    if len(title) > 80:
+        title = title[:79].rstrip() + "…"
+
+    lower_title = title.lower()
+
+    if lower_title.startswith("delete "):
+        target = title[7:].strip()
+        if target:
+            return f"{target} 항목을 삭제함."
+
+    if lower_title.startswith("remove "):
+        target = title[7:].strip()
+        if target:
+            return f"{target} 항목을 제거함."
+
+    if lower_title.startswith("update "):
+        target = title[7:].strip()
+        if target:
+            return f"{target} 내용을 업데이트함."
+
+    if lower_title.startswith("add "):
+        target = title[4:].strip()
+        if target:
+            return f"{target} 항목을 추가함."
+
+    korean_action_suffixes = (
+        "추가",
+        "수정",
+        "변경",
+        "제거",
+        "삭제",
+        "업데이트",
+        "갱신",
+        "보강",
+        "개선",
+        "정리",
+        "적용",
+        "반영",
+        "지원",
+        "롤백",
+        "배포",
+        "구현",
+        "처리",
+        "등록",
+        "분리",
+        "마이그레이션"
+    )
+
+    if title.endswith(("함", "임", "됨")):
+        return f"{title}."
+
+    if title.endswith(korean_action_suffixes):
+        return f"{title}함."
+
+    return f"{title} 관련 변경을 반영함."
+
 def build_policy_based_summary(commit, classification):
     """LLM 호출 없이 커밋 유형별 보수적 요약 생성"""
     estimated_type = classification["estimated_type"]
@@ -1759,7 +1825,12 @@ def build_policy_based_summary(commit, classification):
     changed_file_text = ", ".join(changed_files[:3])
 
     if estimated_type == "empty_diff":
-        return "Diff가 제공되지 않아 커밋 메시지를 기준으로 변경 내용을 보수적으로 요약함."
+        message_based_summary = build_message_based_summary(message_title)
+
+        if message_based_summary:
+            return message_based_summary
+
+        return "커밋 diff가 없어 상세 변경 내용을 확인하기 어려움."
 
     if estimated_type == "format_only":
         lower_message = (commit.message or "").lower()
@@ -1779,13 +1850,13 @@ def build_policy_based_summary(commit, classification):
         return "패키지 버전 또는 배포 메타데이터를 갱신함."
     
     if estimated_type == "test_only":
-        return "테스트 코드만 변경되어 정적 코드 품질 점수 산정에서 제외함."
+        return "테스트 코드 중심의 변경을 반영함."
 
     if estimated_type == "comment_or_docstring_only":
         return "주석 또는 docstring 중심 변경으로 코드 문서화를 보강함."
     
     if estimated_type == "deletion_only":
-        return "추가 구현 없이 기존 코드 삭제만 포함된 변경을 적용함."
+        return "기존 코드 또는 파일 항목을 삭제하는 변경을 적용함."
 
     if estimated_type == "doc_or_config_only":
         return "문서 또는 설정 파일 중심으로 프로젝트 설명과 환경 구성을 정리함."
@@ -1820,12 +1891,15 @@ def build_policy_based_summary(commit, classification):
         return "코드 중심 변경 규모가 커 별도 분석이 필요한 대형 커밋임."
 
     if message_title:
-        return f"{message_title} 커밋의 변경 내용을 보수적으로 요약함."
+        message_based_summary = build_message_based_summary(message_title)
+
+        if message_based_summary:
+            return message_based_summary
 
     if changed_file_text:
-        return f"{changed_file_text} 등 변경 파일을 기준으로 커밋 내용을 보수적으로 요약함."
+        return f"{changed_file_text} 관련 파일 변경을 반영함."
 
-    return "제공된 커밋 정보를 기준으로 변경 내용을 보수적으로 요약함."
+    return "커밋 정보가 제한적이어서 상세 변경 내용을 확인하기 어려움."
 
 
 def build_policy_based_analysis_result(commit, classification=None):
