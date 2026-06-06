@@ -117,8 +117,8 @@ TOKEN_ESTIMATION_CHAR_DIVISOR = 3
 
 # large_diff chunk 분석용 안전 기준
 LARGE_DIFF_CHUNK_MAX_CHARS = 8000
-LARGE_DIFF_MAX_CHUNKS = 50
-LARGE_DIFF_MAX_TOTAL_CHARS_FOR_CHUNK_ANALYSIS = 300000
+LARGE_DIFF_MAX_CHUNKS = 150
+LARGE_DIFF_MAX_TOTAL_CHARS_FOR_CHUNK_ANALYSIS = 1000000
 MAX_LARGE_DIFF_ANALYSIS_LIMIT = 10
 
 # OpenAI 모델별 대략 단가(USD / 1M tokens)
@@ -3895,6 +3895,10 @@ def analyze_static_code(project_id):
         return jsonify({"error": "해당 프로젝트를 찾을 수 없습니다."}), 404
 
     request_data = request.get_json(silent=True) or {}
+
+    if not isinstance(request_data, dict):
+        return jsonify({"error": "요청 본문은 JSON 객체여야 합니다."}), 400
+    
     force = bool(request_data.get("force", False))
     use_llm = bool(request_data.get("use_llm", False))
     analyze_large_diff = bool(request_data.get("analyze_large_diff", False))
@@ -4166,6 +4170,304 @@ def analyze_static_code(project_id):
         "failed_count": failed_count,
         "message": "커밋 정적 분석 결과를 저장했습니다.",
         "analyzed_commits": analyzed_commits[:20]
+    })
+
+# ==========================================
+# 5.4.1. 프로젝트 정적 코드 분석 전체 실행 API 라우터 (POST)
+# ==========================================
+def analyze_static_code_commit_once(commit, include_large_diff=True):
+    """커밋 하나에 대해 정책/LLM/large_diff 분석을 1회 수행"""
+    classification = classify_commit_for_analysis(commit)
+    estimated_type = classification["estimated_type"]
+
+    if estimated_type == "large_code_diff" and include_large_diff:
+        try:
+            large_diff_result, chunk_meta = build_large_diff_chunk_based_analysis_result(
+                commit,
+                classification
+            )
+
+            save_commit_analysis_result(
+                commit,
+                large_diff_result,
+                expected_type=estimated_type,
+                allow_large_diff_success=True
+            )
+
+            result = {
+                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                "estimated_type": estimated_type,
+                "analysis_status": large_diff_result["analysis_status"],
+                "commit_backend_score": large_diff_result["commit_backend_score"],
+                "action": "large_diff_chunk_saved",
+                "chunk_analysis_status": chunk_meta["chunk_analysis_status"],
+                "chunk_plan_reason": chunk_meta["chunk_plan_reason"],
+                "chunk_count": chunk_meta["chunk_count"],
+                "scoreable_chunk_count": chunk_meta["scoreable_chunk_count"]
+            }
+
+            if chunk_meta.get("error"):
+                result["error"] = chunk_meta["error"]
+
+            return result
+
+        except Exception as e:
+            commit.commit_summary = "대형 diff chunk 분석 중 오류가 발생함."
+            commit.commit_backend_score = None
+            commit.analysis_status = "large_diff_pending"
+            commit.score_reason = "chunk 분석 오류로 대형 diff 점수 산정을 보류함."
+
+            return {
+                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                "estimated_type": estimated_type,
+                "analysis_status": "large_diff_pending",
+                "commit_backend_score": None,
+                "action": "large_diff_chunk_failed",
+                "chunk_analysis_status": "pending",
+                "chunk_plan_reason": "chunk_unexpected_error",
+                "error": str(e)[:1200]
+            }
+
+    analysis_result = build_policy_based_analysis_result(commit, classification)
+
+    if analysis_result is None:
+        try:
+            commit_input = build_commit_input(commit)
+            llm_result = call_openai_for_commit_analysis(commit_input)
+            save_commit_analysis_result(commit, llm_result, expected_type=estimated_type)
+
+            return {
+                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                "estimated_type": estimated_type,
+                "analysis_status": llm_result["analysis_status"],
+                "commit_backend_score": llm_result["commit_backend_score"],
+                "action": "llm_saved"
+            }
+
+        except Exception as e:
+            failure_info = classify_llm_failure(e)
+
+            commit.commit_summary = "LLM 커밋 분석 중 오류가 발생함."
+            commit.commit_backend_score = None
+            commit.analysis_status = "failed"
+
+            if failure_info["error_type"] == "status_conflict":
+                commit.score_reason = "LLM 응답 상태와 내부 커밋 분류가 충돌하여 재검토가 필요함."
+            elif failure_info["error_type"] == "api_failed":
+                commit.score_reason = "LLM API 호출 실패로 커밋 분석을 완료하지 못함."
+            elif failure_info["error_type"] == "parse_failed":
+                commit.score_reason = "LLM 응답 JSON 파싱 실패로 분석 결과를 저장하지 못함."
+            else:
+                commit.score_reason = "LLM 응답 검증 또는 저장 중 오류가 발생함."
+
+            result = {
+                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                "estimated_type": estimated_type,
+                "analysis_status": "failed",
+                "commit_backend_score": None,
+                "action": failure_info["action"],
+                "error_type": failure_info["error_type"],
+                "error": str(e)[:1200]
+            }
+
+            if failure_info.get("model_analysis_status") is not None:
+                result["model_analysis_status"] = failure_info["model_analysis_status"]
+
+            return result
+
+    try:
+        save_commit_analysis_result(commit, analysis_result, expected_type=estimated_type)
+
+        return {
+            "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+            "estimated_type": estimated_type,
+            "analysis_status": analysis_result["analysis_status"],
+            "commit_backend_score": analysis_result["commit_backend_score"],
+            "action": "policy_saved"
+        }
+
+    except Exception as e:
+        commit.commit_summary = "커밋 분석 결과 저장 중 오류가 발생함."
+        commit.commit_backend_score = None
+        commit.analysis_status = "failed"
+        commit.score_reason = "정책 기반 분석 결과 저장 중 오류가 발생함."
+
+        return {
+            "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+            "estimated_type": estimated_type,
+            "analysis_status": "failed",
+            "commit_backend_score": None,
+            "action": "policy_failed",
+            "error": str(e)[:1200]
+        }
+
+
+def get_static_analysis_status_counts(commits):
+    """커밋 목록의 정적 분석 상태를 집계"""
+    return {
+        "total_commits": len(commits),
+        "success_count": sum(1 for commit in commits if commit.analysis_status == "success"),
+        "skipped_count": sum(1 for commit in commits if commit.analysis_status == "skipped"),
+        "large_diff_pending_count": sum(1 for commit in commits if commit.analysis_status == "large_diff_pending"),
+        "failed_count": sum(1 for commit in commits if commit.analysis_status == "failed"),
+        "pending_analysis_count": sum(1 for commit in commits if commit.analysis_status is None),
+        "scored_commit_count": sum(1 for commit in commits if commit.commit_backend_score is not None)
+    }
+
+
+@app.route('/api/projects/<int:project_id>/analyze-static-code-all', methods=['POST'])
+def analyze_static_code_all(project_id):
+    """
+    수집된 모든 커밋에 대해 정적 코드 분석을 끝까지 시도하는 관리자용 API
+    일시 실패한 커밋은 같은 요청 안에서 자동 재시도한다.
+    """
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({"error": "해당 프로젝트를 찾을 수 없습니다."}), 404
+
+    request_data = request.get_json(silent=True) or {}
+
+    if not isinstance(request_data, dict):
+        return jsonify({"error": "요청 본문은 JSON 객체여야 합니다."}), 400
+
+    force = bool(request_data.get("force", False))
+    include_large_diff = bool(request_data.get("include_large_diff", True))
+    retry_failed = bool(request_data.get("retry_failed", True))
+    retry_large_diff_pending = bool(request_data.get("retry_large_diff_pending", True))
+    stop_on_error = bool(request_data.get("stop_on_error", False))
+    max_retry_per_commit = request_data.get("max_retry_per_commit", 10)
+
+    try:
+        max_retry_per_commit = int(max_retry_per_commit)
+    except (TypeError, ValueError):
+        return jsonify({"error": "max_retry_per_commit은 정수여야 합니다."}), 400
+
+    if max_retry_per_commit < 1:
+        return jsonify({"error": "max_retry_per_commit은 1 이상이어야 합니다."}), 400
+
+    if max_retry_per_commit > 10:
+        return jsonify({"error": "max_retry_per_commit은 최대 10까지만 허용합니다."}), 400
+
+    if not OPENAI_API_KEY:
+        return jsonify({
+            "error": "OPENAI_API_KEY 환경변수가 설정되어 있지 않아 전체 LLM 분석을 실행할 수 없습니다."
+        }), 400
+
+    attempt_counts = defaultdict(int)
+    processed_commits = []
+    stopped_by_error = False
+
+    def should_retry_commit(commit, is_first_pass=False):
+        if is_first_pass and force:
+            return True
+
+        if commit.analysis_status is None:
+            return True
+
+        if retry_failed and commit.analysis_status == "failed":
+            return True
+
+        if include_large_diff and retry_large_diff_pending and commit.analysis_status == "large_diff_pending":
+            return True
+
+        return False
+
+    for round_index in range(1, max_retry_per_commit + 1):
+        all_commits = (
+            CommitDetail.query
+            .filter_by(project_id=project.id)
+            .order_by(CommitDetail.committed_at.asc())
+            .all()
+        )
+
+        candidates = []
+
+        for commit in all_commits:
+            commit_key = commit.commit_hash or str(commit.id)
+
+            if attempt_counts[commit_key] >= max_retry_per_commit:
+                continue
+
+            if should_retry_commit(commit, is_first_pass=(round_index == 1)):
+                candidates.append(commit)
+
+        if not candidates:
+            break
+
+        for commit in candidates:
+            commit_key = commit.commit_hash or str(commit.id)
+            before_status = commit.analysis_status
+            attempt_counts[commit_key] += 1
+
+            result = analyze_static_code_commit_once(
+                commit,
+                include_large_diff=include_large_diff
+            )
+            result["attempt"] = attempt_counts[commit_key]
+            result["round"] = round_index
+            result["before_status"] = before_status
+            processed_commits.append(result)
+
+            if stop_on_error and result.get("analysis_status") == "failed":
+                stopped_by_error = True
+                break
+
+        db.session.commit()
+
+        if stopped_by_error:
+            break
+
+    final_commits = (
+        CommitDetail.query
+        .filter_by(project_id=project.id)
+        .order_by(CommitDetail.committed_at.asc())
+        .all()
+    )
+    final_counts = get_static_analysis_status_counts(final_commits)
+
+    unresolved_count = (
+        final_counts["pending_analysis_count"]
+        + final_counts["failed_count"]
+        + final_counts["large_diff_pending_count"]
+    )
+
+    response_status = "success" if unresolved_count == 0 else "partial_success"
+
+    remaining_commits = []
+    for commit in final_commits:
+        if commit.analysis_status is None or commit.analysis_status in ("failed", "large_diff_pending"):
+            remaining_commits.append({
+                "commit_hash": commit.commit_hash[:7] if commit.commit_hash else None,
+                "message": commit.message.splitlines()[0] if commit.message else "",
+                "analysis_status": commit.analysis_status,
+                "commit_backend_score": commit.commit_backend_score,
+                "score_reason": commit.score_reason
+            })
+
+    return jsonify({
+        "status": response_status,
+        "project_id": project.id,
+        "project_name": project.name,
+        "force": force,
+        "include_large_diff": include_large_diff,
+        "retry_failed": retry_failed,
+        "retry_large_diff_pending": retry_large_diff_pending,
+        "max_retry_per_commit": max_retry_per_commit,
+        "processed_attempt_count": len(processed_commits),
+        "processed_commit_count": len(set(
+            item.get("commit_hash")
+            for item in processed_commits
+            if item.get("commit_hash")
+        )),
+        "final_counts": final_counts,
+        "unresolved_count": unresolved_count,
+        "message": (
+            "처리 가능한 모든 커밋 정적 분석을 완료했습니다."
+            if unresolved_count == 0
+            else "일부 커밋은 자동 재시도 후에도 분석이 완료되지 않았습니다."
+        ),
+        "processed_commits_preview": processed_commits[:50],
+        "remaining_commits": remaining_commits[:50]
     })
 
 # ==========================================
