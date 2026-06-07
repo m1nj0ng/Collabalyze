@@ -20,6 +20,7 @@ const DashboardPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedForCompare, setSelectedForCompare] = useState([]);
+  const [pieMetric, setPieMetric] = useState('score'); // 원형 차트 기준 (score, commits, pullRequests, reviews, issues)
 
   // 역할 판별 로직 (Persona Logic)
   const getMemberPersona = (member) => {
@@ -55,6 +56,7 @@ const DashboardPage = () => {
           }
         }
 
+        // const response = await axios.get(`http://localhost:5000/api/projects/${projectId}/contributions?compact=true`);
         const response = await axios.get(`http://3.39.190.222:5000/api/projects/${projectId}/contributions?compact=true`);
         
         // 응답 데이터가 배열 형태(data)로 온다고 가정
@@ -83,11 +85,11 @@ const DashboardPage = () => {
             score: Number(item.final_score) || 0,
             quantitativeScore: Number(quant.quantitative_score) || 0,
             collaborationScore: Number(nlp.qualitative_score) || 0,
-            backendCodeScore: staticCode.backend_code_score !== undefined && staticCode.backend_code_score !== null ? Number(staticCode.backend_code_score) : null,
+            backendCodeScore: staticCode.backend_code_score || null,
             
             // 3. NLP 및 요약 데이터 (null 필터링 적용)
             collabNetwork: nlp.collab_network || [],
-            commitSummaries: (nlp.commits || []).map(c => ({ text: c.commit_summary, date: c.date || c.created_at || c.timestamp })).filter(c => c.text),
+            commitSummaries: (nlp.commits || []).map(c => ({ text: c.commit_summary, date: c.date || c.created_at || c.timestamp, changed_files: c.changed_files || [] })).filter(c => c.text),
             changedFiles: (nlp.commits || []).flatMap(c => c.changed_files || []),
             prSummaries: (nlp.pull_requests || []).map(pr => ({ text: pr.pr_summary, date: pr.created_at || pr.updated_at || pr.closed_at || pr.date })).filter(pr => pr.text),
             issueSummaries: (nlp.issues || []).map(i => ({ text: i.issue_summary, date: i.created_at || i.updated_at || i.closed_at || i.date })).filter(i => i.text),
@@ -215,10 +217,46 @@ const DashboardPage = () => {
           </div>
 
           <div className="chart-container" style={{ background: '#fff', padding: '24px', borderRadius: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-            <h3 style={{ margin: '0 0 20px 0', fontSize: '1rem', color: '#1e293b' }}>기여도 분포</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h3 style={{ margin: 0, fontSize: '1rem', color: '#1e293b' }}>기여도 분포</h3>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {[
+                  { id: 'score', label: '종합' },
+                  { id: 'commits', label: 'Commits' },
+                  { id: 'pullRequests', label: 'PRs' },
+                  { id: 'reviews', label: 'Reviews' },
+                  { id: 'issues', label: 'Issues' }
+                ].map(m => (
+                  <button
+                    key={m.id}
+                    onClick={() => setPieMetric(m.id)}
+                    style={{
+                      padding: '4px 8px',
+                      borderRadius: '6px',
+                      border: pieMetric === m.id ? '1px solid #c7d2fe' : '1px solid #e2e8f0',
+                      backgroundColor: pieMetric === m.id ? '#eef2ff' : '#ffffff',
+                      color: pieMetric === m.id ? '#4f46e5' : '#64748b',
+                      fontSize: '0.75rem',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-              <ActivityPieChart data={dashboardData} />
-              <p style={{ margin: '15px 0 0 0', fontSize: '0.85rem', color: '#64748b' }}>* 커밋, 리뷰, 이슈 데이터 기준</p>
+              <ActivityPieChart data={dashboardData} metric={pieMetric} />
+              <p style={{ margin: '15px 0 0 0', fontSize: '0.85rem', color: '#64748b', fontWeight: '500' }}>
+                * {
+                  pieMetric === 'score' ? '종합 기여 점수 기준' :
+                  pieMetric === 'commits' ? '커밋 횟수 기준' :
+                  pieMetric === 'pullRequests' ? 'PR 생성 횟수 기준' :
+                  pieMetric === 'reviews' ? '코드 리뷰 횟수 기준' : '이슈 등록 횟수 기준'
+                }
+              </p>
             </div>
           </div>
 

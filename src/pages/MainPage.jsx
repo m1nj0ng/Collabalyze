@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import IssueStatisticsTable from '../components/IssueStatisticsTable';
 
 const MainPage = () => {
   const [activeTab, setActiveTab] = useState('my'); // 'my' | 'external'
@@ -11,6 +12,17 @@ const MainPage = () => {
   const [isFetchingExternal, setIsFetchingExternal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isRepoModalOpen, setIsRepoModalOpen] = useState(false);
+  const [isJiraLinked, setIsJiraLinked] = useState(false);
+  const [workspaceGoals, setWorkspaceGoals] = useState(() => {
+    try {
+      const saved = localStorage.getItem('workspaceGoals');
+      return saved ? JSON.parse(saved) : {};
+    } catch (error) {
+      return {};
+    }
+  });
+  const [isEditingGoal, setIsEditingGoal] = useState(false);
+  const [tempGoal, setTempGoal] = useState('');
 
   // 상태를 localStorage에서 초기화하거나 기본값으로 설정
   const [isLoggedIn, setIsLoggedIn] = useState(() => {
@@ -331,6 +343,8 @@ const MainPage = () => {
     return Object.values(groups);
   }, [historyWithStats]);
 
+  const currentWorkspaceKey = activeTab === 'my' ? selectedOwner : (externalUrl.split('/').pop() || 'external');
+
   return (
     <div className="main-container" style={{ minHeight: '100vh', backgroundColor: '#f9fafb', padding: '40px 20px', fontFamily: '"Inter", sans-serif' }}>
       <style>{`
@@ -351,9 +365,6 @@ const MainPage = () => {
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
               <button onClick={handleLogout} style={{ marginTop: '20px', padding: '8px 16px', backgroundColor: '#f1f5f9', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontWeight: '500' }}>
                 로그아웃
-              </button>
-              <button onClick={() => { if(window.confirm('모든 기록을 삭제하고 초기화하시겠습니까?')) { localStorage.clear(); window.location.reload(); } }} style={{ marginTop: '20px', padding: '8px 16px', backgroundColor: '#fee2e2', color: '#ef4444', border: '1px solid #fecaca', borderRadius: '6px', cursor: 'pointer', fontWeight: '500' }}>
-                데이터 전체 초기화
               </button>
             </div>
           )}
@@ -565,7 +576,7 @@ const MainPage = () => {
 
         {/* 프로젝트 워크스페이스 관리 모달 */}
         {isRepoModalOpen && (
-          <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px', animation: 'fadeIn 0.2s ease-out', backdropFilter: 'blur(4px)' }} onClick={() => setIsRepoModalOpen(false)}>
+          <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px', animation: 'fadeIn 0.2s ease-out', backdropFilter: 'blur(4px)' }} onClick={() => { setIsRepoModalOpen(false); setIsEditingGoal(false); }}>
             <div style={{ backgroundColor: '#ffffff', padding: '0', borderRadius: '16px', width: '100%', maxWidth: '900px', maxHeight: '90vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)', animation: 'slideUp 0.3s ease-out' }} onClick={e => e.stopPropagation()}>
 
               {/* 헤더 */}
@@ -579,7 +590,7 @@ const MainPage = () => {
                   </h2>
                   <p style={{ margin: '8px 0 0 0', color: '#64748b', fontSize: '0.95rem' }}>해당 조직(계정)의 저장소를 관리하고 분석을 진행하세요.</p>
                 </div>
-                <button onClick={() => setIsRepoModalOpen(false)} style={{ background: 'none', border: 'none', fontSize: '2rem', cursor: 'pointer', color: '#94a3b8', lineHeight: '1', padding: '0' }}>&times;</button>
+                <button onClick={() => { setIsRepoModalOpen(false); setIsEditingGoal(false); }} style={{ background: 'none', border: 'none', fontSize: '2rem', cursor: 'pointer', color: '#94a3b8', lineHeight: '1', padding: '0' }}>&times;</button>
               </div>
 
               {/* 내용 */}
@@ -598,6 +609,78 @@ const MainPage = () => {
                     <div style={{ color: '#64748b', fontSize: '0.85rem', fontWeight: '600', marginBottom: '8px' }}>과거 분석 이력</div>
                     <div style={{ fontSize: '2rem', fontWeight: '800', color: '#4f46e5' }}>{(displayedRepos || []).filter(repo => repo && (historyWithStats || []).some(h => h?.url === repo?.url)).length}<span style={{ fontSize: '1rem', color: '#94a3b8', marginLeft: '4px', fontWeight: '600' }}>개 프로젝트</span></div>
                   </div>
+                </div>
+
+                {/* 워크스페이스 목표 및 방향 */}
+                <div style={{ marginBottom: '30px', padding: '20px', backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e2e8f0', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isEditingGoal ? '10px' : '0' }}>
+                    <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#1e293b', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      워크스페이스 목표
+                    </h3>
+                    {!isEditingGoal && (
+                      <button 
+                        onClick={() => { setTempGoal(workspaceGoals[currentWorkspaceKey] || ''); setIsEditingGoal(true); }}
+                        style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#64748b', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer', transition: 'all 0.2s' }}
+                        onMouseEnter={e => e.currentTarget.style.backgroundColor = '#e2e8f0'}
+                        onMouseLeave={e => e.currentTarget.style.backgroundColor = '#f1f5f9'}
+                      >
+                        수정
+                      </button>
+                    )}
+                  </div>
+                  
+                  {isEditingGoal ? (
+                    <div>
+                      <textarea 
+                        value={tempGoal} 
+                        onChange={(e) => setTempGoal(e.target.value)} 
+                        placeholder="이번 스프린트의 목표나 프로젝트의 주요 방향성을 자유롭게 작성해보세요."
+                        style={{ width: '100%', minHeight: '80px', padding: '12px', borderRadius: '8px', border: '1px solid #4f46e5', backgroundColor: '#ffffff', fontSize: '0.95rem', outline: 'none', resize: 'vertical', fontFamily: 'inherit', color: '#0f172a', boxSizing: 'border-box', boxShadow: '0 0 0 3px rgba(79, 70, 229, 0.15)' }}
+                      />
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '10px' }}>
+                        <button onClick={() => setIsEditingGoal(false)} style={{ padding: '6px 14px', backgroundColor: '#f8fafc', color: '#64748b', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer' }}>취소</button>
+                        <button onClick={() => { setWorkspaceGoals(prev => ({ ...prev, [currentWorkspaceKey]: tempGoal })); setIsEditingGoal(false); }} style={{ padding: '6px 14px', backgroundColor: '#4f46e5', color: '#ffffff', border: 'none', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer' }}>저장</button>
+                      </div>
+                    </div>
+                  ) : (
+                    workspaceGoals[currentWorkspaceKey] ? (
+                      <div style={{ marginTop: '15px', color: '#475569', fontSize: '0.95rem', lineHeight: '1.6', whiteSpace: 'pre-wrap' }}>{workspaceGoals[currentWorkspaceKey]}</div>
+                    ) : (
+                      <div style={{ marginTop: '15px', color: '#94a3b8', fontSize: '0.9rem', cursor: 'pointer' }} onClick={() => { setTempGoal(''); setIsEditingGoal(true); }}>아직 설정된 목표가 없습니다. 우측 상단의 '수정' 버튼을 눌러 조직의 방향성을 추가해보세요.</div>
+                    )
+                  )}
+                </div>
+
+                {/* 2차원 이슈 통계 필터 (더미 데이터) */}
+                <div style={{ marginBottom: '30px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+                    <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#1e293b', fontWeight: '700' }}>워크스페이스 업무 현황 (Preview)</h3>
+                    <button 
+                      onClick={() => setIsJiraLinked(!isJiraLinked)}
+                      style={{ padding: '6px 14px', backgroundColor: isJiraLinked ? '#16a34a' : '#0052CC', color: '#ffffff', border: 'none', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'background 0.2s' }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = isJiraLinked ? '#15803d' : '#0047b3'}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = isJiraLinked ? '#16a34a' : '#0052CC'}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M11.53 2c0 2.39-1.89 4.34-4.25 4.34-2.35 0-4.25-1.95-4.25-4.34zm0 8.68c0 2.39-1.89 4.34-4.25 4.34-2.35 0-4.25-1.95-4.25-4.34zm8.5 0c0 2.39-1.89 4.34-4.25 4.34-2.36 0-4.25-1.95-4.25-4.34zm0 8.68c0 2.39-1.89 4.34-4.25 4.34-2.36 0-4.25-1.95-4.25-4.34z"/>
+                      </svg>
+                      {isJiraLinked ? 'Jira 연동 해제' : 'Jira 연동'}
+                    </button>
+                  </div>
+                  {isJiraLinked ? (
+                    <IssueStatisticsTable data={[
+                      { name: 'Alice', issues: 24 },
+                      { name: 'Bob', issues: 15 },
+                      { name: 'Charlie', issues: 31 },
+                      { name: 'Dave', issues: 8 },
+                      { name: 'Eve', issues: 12 }
+                    ]} />
+                  ) : (
+                    <div style={{ padding: '40px', textAlign: 'center', backgroundColor: '#f8fafc', borderRadius: '12px', border: '1px dashed #cbd5e1', color: '#64748b' }}>
+                      <p style={{ margin: '0 0 10px 0', fontSize: '1rem', fontWeight: '600', color: '#475569' }}>Jira를 연동하여 업무 현황을 불러오세요.</p>
+                      <p style={{ margin: 0, fontSize: '0.85rem' }}>팀원별 구체적인 이슈 진행 상태가 이 곳에 표시됩니다.</p>
+                    </div>
+                  )}
                 </div>
 
                 {/* 리포지토리 리스트 */}

@@ -12,6 +12,7 @@ const FilteredActivityList = ({ logs }) => {
     const formatItem = (item, type, color, bg, index) => {
       let text = typeof item === 'string' ? item : item.text;
       let date = typeof item === 'object' && item.date ? item.date : null;
+      let changedFiles = typeof item === 'object' && item.changed_files ? item.changed_files : [];
       
       let dateObj = new Date();
       if (date) {
@@ -26,7 +27,7 @@ const FilteredActivityList = ({ logs }) => {
       
       const dateStr = `${dateObj.getFullYear()}.${String(dateObj.getMonth() + 1).padStart(2, '0')}.${String(dateObj.getDate()).padStart(2, '0')} ${String(dateObj.getHours()).padStart(2, '0')}:${String(dateObj.getMinutes()).padStart(2, '0')}`;
       
-      return { type, text, date: dateStr, dateObj, color, bg };
+      return { type, text, date: dateStr, dateObj, color, bg, changedFiles };
     };
 
     const prs = (logs?.pullRequests || []).map((item, i) => formatItem(item, 'PR', '#10b981', '#d1fae5', i));
@@ -74,18 +75,26 @@ const FilteredActivityList = ({ logs }) => {
         {filteredActivities.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {filteredActivities.map((item, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '15px', padding: '14px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', flexShrink: 0, width: '70px' }}>
-                  <span style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: item.bg, color: item.color, fontSize: '0.75rem', fontWeight: 'bold', width: '100%', boxSizing: 'border-box', textAlign: 'center' }}>
-                    {item.type}
-                  </span>
-                  <span style={{ color: '#94a3b8', fontSize: '0.7rem', textAlign: 'center', lineHeight: '1.3', letterSpacing: '-0.02em' }}>
-                    {item.date.split(' ')[0]}<br/>{item.date.split(' ')[1]}
-                  </span>
+              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px', padding: '14px', backgroundColor: '#f8fafc', borderRadius: '10px', border: '1px solid #f1f5f9' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', flex: 1, minWidth: 0, textAlign: 'left' }}>
+                  <span style={{ padding: '4px 10px', borderRadius: '6px', backgroundColor: item.bg, color: item.color, fontSize: '0.75rem', fontWeight: 'bold', minWidth: '55px', textAlign: 'center', marginTop: '2px', flexShrink: 0 }}>{item.type}</span>
+                  <div style={{ flex: 1, minWidth: 0, textAlign: 'left', marginTop: '2px' }}>
+                    <span style={{ color: '#334155', fontSize: '0.95rem', lineHeight: '1.5', wordBreak: 'break-word' }}>{item.text}</span>
+                  {item.changedFiles && item.changedFiles.length > 0 && (
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '8px' }}>
+                      {item.changedFiles.slice(0, 5).map((file, fIdx) => (
+                        <span key={fIdx} style={{ padding: '2px 8px', backgroundColor: '#ffffff', color: '#64748b', borderRadius: '4px', fontSize: '0.7rem', border: '1px solid #cbd5e1', whiteSpace: 'nowrap' }}>
+                          📄 {file.split('/').pop()}
+                        </span>
+                      ))}
+                      {item.changedFiles.length > 5 && (
+                        <span style={{ padding: '2px 8px', backgroundColor: '#f1f5f9', color: '#94a3b8', borderRadius: '4px', fontSize: '0.7rem', border: '1px solid #e2e8f0' }}>+{item.changedFiles.length - 5}</span>
+                      )}
+                    </div>
+                  )}
+                  </div>
                 </div>
-                <div style={{ flex: 1, minWidth: 0, textAlign: 'left', marginTop: '2px' }}>
-                  <span style={{ color: '#334155', fontSize: '0.95rem', lineHeight: '1.5', wordBreak: 'break-word' }}>{item.text}</span>
-                </div>
+                <span style={{ color: '#94a3b8', fontSize: '0.85rem', whiteSpace: 'nowrap', flexShrink: 0, marginTop: '2px', textAlign: 'right' }}>{item.date}</span>
               </div>
             ))}
           </div>
@@ -440,9 +449,9 @@ const DetailPage = () => {
     
     // 본인 기여도 표시 (실제 데이터 우선)
     score: realMember ? realMember.score : baseMember.contributionScore,
-    quantitativeScore: realMember ? realMember.quantitativeScore : 85,
-    collaborationScore: realMember ? realMember.collaborationScore : 90,
-    backendCodeScore: realMember ? realMember.backendCodeScore : 88,
+    quantitativeScore: realMember ? realMember.quantitativeScore : 0,
+    collaborationScore: realMember ? realMember.collaborationScore : 0,
+    backendCodeScore: realMember ? realMember.backendCodeScore : null,
     commitsCount: realMember ? realMember.commits : 0,
     prCount: realMember ? realMember.pullRequests : 0,
     reviewsCount: realMember ? realMember.reviews : 0,
@@ -486,6 +495,19 @@ const DetailPage = () => {
     engagement: realMember ? null : baseMember.engagement,
     
     radarData: realMember ? generateRadarData(realMember) : baseMember.radarData,
+    
+    // 주로 다룬 파일 확장자 (탑 3) 추출
+    topFiles: realMember ? (() => {
+      const files = realMember.changedFiles || [];
+      if (!files.length) return [];
+      const counts = {};
+      files.forEach(f => {
+        const ext = f.includes('.') ? f.split('.').pop() : f.split('/').pop();
+        const name = f.includes('.') ? `*.${ext}` : ext;
+        counts[name] = (counts[name] || 0) + 1;
+      });
+      return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0]);
+    })() : ["*.js", "*.jsx", "*.css"],
   };
 
   return (
@@ -535,6 +557,9 @@ const DetailPage = () => {
               <p style={{ margin: 0, color: '#475569', lineHeight: '1.6', fontSize: '0.95rem' }}>{member.codeAnalysis} {member.analysis?.expertise}</p>
               <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
                 {member.analysisMetrics?.expertise?.map((m, i) => <span key={i} style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>{m}</span>)}
+                {member.topFiles?.length > 0 && (
+                  <span style={{ padding: '4px 10px', backgroundColor: '#eef2ff', color: '#4f46e5', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #c7d2fe' }}>주요 다룬 파일: {member.topFiles.join(', ')}</span>
+                )}
               </div>
             </div>
             <div>
