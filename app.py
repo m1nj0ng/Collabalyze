@@ -4303,17 +4303,59 @@ def analyze_static_code_commit_once(commit, include_large_diff=True):
 
 
 def get_static_analysis_status_counts(commits):
-    """커밋 목록의 정적 분석 상태를 집계"""
+    """커밋 목록의 정적 분석 상태와 진행률을 집계"""
+    total_commits = len(commits)
+
+    success_count = sum(1 for commit in commits if commit.analysis_status == "success")
+    skipped_count = sum(1 for commit in commits if commit.analysis_status == "skipped")
+    large_diff_pending_count = sum(1 for commit in commits if commit.analysis_status == "large_diff_pending")
+    failed_count = sum(1 for commit in commits if commit.analysis_status == "failed")
+    pending_analysis_count = sum(1 for commit in commits if commit.analysis_status is None)
+    scored_commit_count = sum(1 for commit in commits if commit.commit_backend_score is not None)
+
+    processed_count = total_commits - pending_analysis_count
+    unresolved_count = pending_analysis_count + failed_count + large_diff_pending_count
+    progress_percent = round((processed_count / total_commits) * 100, 2) if total_commits else 0.0
+
     return {
-        "total_commits": len(commits),
-        "success_count": sum(1 for commit in commits if commit.analysis_status == "success"),
-        "skipped_count": sum(1 for commit in commits if commit.analysis_status == "skipped"),
-        "large_diff_pending_count": sum(1 for commit in commits if commit.analysis_status == "large_diff_pending"),
-        "failed_count": sum(1 for commit in commits if commit.analysis_status == "failed"),
-        "pending_analysis_count": sum(1 for commit in commits if commit.analysis_status is None),
-        "scored_commit_count": sum(1 for commit in commits if commit.commit_backend_score is not None)
+        "total_commits": total_commits,
+        "processed_count": processed_count,
+        "progress_percent": progress_percent,
+        "success_count": success_count,
+        "skipped_count": skipped_count,
+        "large_diff_pending_count": large_diff_pending_count,
+        "failed_count": failed_count,
+        "pending_analysis_count": pending_analysis_count,
+        "scored_commit_count": scored_commit_count,
+        "unresolved_count": unresolved_count
     }
 
+@app.route('/api/projects/<int:project_id>/static-analysis-progress', methods=['GET'])
+def get_static_analysis_progress(project_id):
+    """
+    정적 코드 분석 진행률 조회 API.
+    analyze-static-code-all 실행 중 중간 commit된 DB 상태를 기준으로 진행률을 계산한다.
+    """
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({"error": "해당 프로젝트를 찾을 수 없습니다."}), 404
+
+    commits = (
+        CommitDetail.query
+        .filter_by(project_id=project.id)
+        .order_by(CommitDetail.committed_at.asc())
+        .all()
+    )
+
+    progress_counts = get_static_analysis_status_counts(commits)
+
+    return jsonify({
+        "status": "success",
+        "project_id": project.id,
+        "project_name": project.name,
+        "message": "DB에 저장된 정적 코드 분석 진행률입니다.",
+        **progress_counts
+    }), 200
 
 @app.route('/api/projects/<int:project_id>/analyze-static-code-all', methods=['POST'])
 def analyze_static_code_all(project_id):
@@ -4336,6 +4378,7 @@ def analyze_static_code_all(project_id):
     retry_large_diff_pending = bool(request_data.get("retry_large_diff_pending", True))
     stop_on_error = bool(request_data.get("stop_on_error", False))
     max_retry_per_commit = request_data.get("max_retry_per_commit", 10)
+    progress_commit_interval = request_data.get("progress_commit_interval", 10)
 
     try:
         max_retry_per_commit = int(max_retry_per_commit)
@@ -4347,6 +4390,17 @@ def analyze_static_code_all(project_id):
 
     if max_retry_per_commit > 10:
         return jsonify({"error": "max_retry_per_commit은 최대 10까지만 허용합니다."}), 400
+    
+    try:
+        progress_commit_interval = int(progress_commit_interval)
+    except (TypeError, ValueError):
+        return jsonify({"error": "progress_commit_interval은 정수여야 합니다."}), 400
+
+    if progress_commit_interval < 1:
+        return jsonify({"error": "progress_commit_interval은 1 이상이어야 합니다."}), 400
+
+    if progress_commit_interval > 100:
+        return jsonify({"error": "progress_commit_interval은 최대 100까지만 허용합니다."}), 400
 
     if not OPENAI_API_KEY:
         return jsonify({
@@ -4408,6 +4462,9 @@ def analyze_static_code_all(project_id):
             result["before_status"] = before_status
             processed_commits.append(result)
 
+            if progress_commit_interval and len(processed_commits) % progress_commit_interval == 0:
+                db.session.commit()
+
             if stop_on_error and result.get("analysis_status") == "failed":
                 stopped_by_error = True
                 break
@@ -4453,6 +4510,7 @@ def analyze_static_code_all(project_id):
         "retry_failed": retry_failed,
         "retry_large_diff_pending": retry_large_diff_pending,
         "max_retry_per_commit": max_retry_per_commit,
+        "progress_commit_interval": progress_commit_interval,
         "processed_attempt_count": len(processed_commits),
         "processed_commit_count": len(set(
             item.get("commit_hash")
