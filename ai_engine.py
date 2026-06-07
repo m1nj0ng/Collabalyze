@@ -28,11 +28,14 @@ GEMINI_MAX_RETRIES = int(os.environ.get("GEMINI_MAX_RETRIES", "4"))
 GEMINI_RETRY_BASE_SEC = float(os.environ.get("GEMINI_RETRY_BASE_SEC", "2.0"))
 GEMINI_INTER_CHUNK_SLEEP_SEC = float(os.environ.get("GEMINI_INTER_CHUNK_SLEEP_SEC", "1.0"))
 GEMINI_JSON_PARSE_RETRIES = int(os.environ.get("GEMINI_JSON_PARSE_RETRIES", "2"))
+# 협업 NLP: PR/이슈당 collab 점수용으로 합칠 최대 댓글 수 (PR 1건 = 임베딩 1회)
+COLLAB_MAX_COMMENTS_PER_ITEM = int(os.environ.get("COLLAB_MAX_COMMENTS_PER_ITEM", "40"))
+COLLAB_MAX_MERGED_TEXT_CHARS = int(os.environ.get("COLLAB_MAX_MERGED_TEXT_CHARS", "4000"))
 
 PRIMARY_EMBEDDING_MODEL = "BAAI/bge-m3"
 FALLBACK_EMBEDDING_MODEL = "intfloat/multilingual-e5-large-instruct"
 
-SCORE_CONFIG = {"w_quant": 0.2, "w_collab": 0.5, "w_static": 0.3}
+SCORE_CONFIG = {"w_quant": 0.2, "w_collab": 0.6, "w_static": 0.2}
 COLLAB_CHANNEL_WEIGHTS = {"commit": 0.25, "pr": 0.45, "issue": 0.30}
 # 정량 하위 지표 가중치 (합 = 1.0)
 QUANT_COMPONENT_WEIGHTS = {
@@ -155,10 +158,23 @@ def impute_median(series):
     return pd.to_numeric(series, errors="coerce").fillna(m)
 
 
-def flat_comment_texts(items):
-    """PR/issue comments가 문자열 또는 {body|text} 객체인 경우 모두 문자열로 펼칩니다."""
+def flat_comment_texts(items, *, max_comments: Optional[int] = None):
+    """PR/issue comments가 문자열 또는 {body|text} 객체인 경우 모두 문자열로 펼칩니다.
+
+    max_comments=-1 이면 상한 없음 (collab_network 집계 등).
+    """
+    if max_comments == -1:
+        limit = None
+    elif max_comments is None:
+        limit = COLLAB_MAX_COMMENTS_PER_ITEM
+    else:
+        limit = max_comments
+    if limit is not None and limit <= 0:
+        return []
     out = []
     for item in items or []:
+        if limit is not None and len(out) >= limit:
+            break
         if isinstance(item, str) and item.strip():
             out.append(item.strip())
         elif isinstance(item, dict):
@@ -166,6 +182,24 @@ def flat_comment_texts(items):
             if str(text).strip():
                 out.append(str(text).strip())
     return out
+
+
+def collab_text_for_thread(item: dict, *, max_comments: Optional[int] = None) -> str:
+    """PR/이슈 1건당 collab 점수용 텍스트 1덩어리 → 임베딩 1회."""
+    parts = []
+    title = (item.get("title") or "").strip()
+    body = (item.get("body") or "").strip()
+    if title:
+        parts.append(title)
+    if body:
+        parts.append(body)
+    comments = flat_comment_texts(item.get("comments"), max_comments=max_comments)
+    if comments:
+        parts.append("\n".join(comments))
+    text = "\n".join(parts).strip()
+    if COLLAB_MAX_MERGED_TEXT_CHARS > 0 and len(text) > COLLAB_MAX_MERGED_TEXT_CHARS:
+        text = text[:COLLAB_MAX_MERGED_TEXT_CHARS] + "…"
+    return text
 
 
 def effective_collab_weights(commit_avg, pr_avg, issue_avg, weights):
@@ -200,7 +234,7 @@ def validate_score_ranges(df, score_cols):
 
 
 def collect_activity_text_bundle(row) -> str:
-    """커밋/PR/이슈 텍스트를 한 덩어리로 모읍니다 (Gemini 입력용)."""
+    """커밋/PR/이슈 작성자 텍스트만 모읍니다 (Gemini overall 입력용, 댓글·리뷰 제외)."""
     nlp = row["raw_user_data"].get("2_nlp_data", {})
     parts = []
 
@@ -218,16 +252,12 @@ def collect_activity_text_bundle(row) -> str:
         b = (pr.get("body") or "").strip()
         if t or b:
             parts.append(f"[PR] {t} {b}".strip())
-        for cm in flat_comment_texts(pr.get("comments")):
-            parts.append(f"[PR 코멘트] {cm}")
 
     for issue in nlp.get("issues", []):
         t = (issue.get("title") or "").strip()
         b = (issue.get("body") or "").strip()
         if t or b:
             parts.append(f"[이슈] {t} {b}".strip())
-        for cm in flat_comment_texts(issue.get("comments")):
-            parts.append(f"[이슈 코멘트] {cm}")
 
     blob = "\n".join(parts).strip()
     if len(blob) > GEMINI_MAX_INPUT_CHARS:
@@ -981,17 +1011,15 @@ class GitHubInsightEngine:
 
             pr_texts = []
             for pr in nlp.get("pull_requests", []):
-                block = f"{pr.get('title') or ''} {pr.get('body') or ''}".strip()
+                block = collab_text_for_thread(pr)
                 if block:
                     pr_texts.append(block)
-                pr_texts.extend(flat_comment_texts(pr.get("comments")))
 
             issue_texts = []
             for issue in nlp.get("issues", []):
-                block = f"{issue.get('title') or ''} {issue.get('body') or ''}".strip()
+                block = collab_text_for_thread(issue)
                 if block:
                     issue_texts.append(block)
-                issue_texts.extend(flat_comment_texts(issue.get("comments")))
 
             commit_results = [self.evaluator.eval_text(msg, "commit") for msg in commit_msgs if str(msg).strip()]
             pr_results = [self.evaluator.eval_text(text, "long") for text in pr_texts if str(text).strip()]

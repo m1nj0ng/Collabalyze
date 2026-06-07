@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -19,15 +20,172 @@ from ai_engine import (
     GEMINI_INTER_CHUNK_SLEEP_SEC,
     GEMINI_MODEL_DEFAULT,
     GEMINI_SUMMARY_MAX_CHARS,
+    _gemini_extract_json_object,
     _gemini_parse_json_with_retries,
-    flat_comment_texts,
     normalize_outline_summary,
 )
 
 
 AI_ANALYSIS_API_BASE_DEFAULT = "http://3.39.190.222:5000"
 # PR/Issue Gemini: 한 번에 넣는 개수 (토큰 과다 시 줄이거나, GEMINI_PR_ISSUE_CHUNK 로 배치 호출)
-GEMINI_PR_ISSUE_CHUNK = int(os.environ.get("GEMINI_PR_ISSUE_CHUNK", "12"))
+GEMINI_PR_ISSUE_CHUNK = int(os.environ.get("GEMINI_PR_ISSUE_CHUNK", "8"))
+# PR/Issue Gemini 요약용 본문·코멘트 전처리 (collab_network 와 무관)
+GEMINI_SUMMARY_BODY_MAX_CHARS = int(os.environ.get("GEMINI_SUMMARY_BODY_MAX_CHARS", "800"))
+GEMINI_SUMMARY_COMMENTS_MAX_CHARS = int(os.environ.get("GEMINI_SUMMARY_COMMENTS_MAX_CHARS", "600"))
+GEMINI_SUMMARY_FALLBACK_BODY_CHARS = int(os.environ.get("GEMINI_SUMMARY_FALLBACK_BODY_CHARS", "200"))
+
+_WORK_SECTION_HEADERS = (
+    re.compile(r"##\s*[^\n]*작업\s*내용", re.I),
+    re.compile(r"##\s*[^\n]*📝\s*작업\s*내용", re.I),
+    re.compile(r"##\s*[^\n]*work\s*content", re.I),
+    re.compile(r"##\s*[^\n]*description", re.I),
+    re.compile(r"##\s*[^\n]*🐞[^\n]*버그", re.I),
+    re.compile(r"##\s*[^\n]*버그\s*설명", re.I),
+    re.compile(r"##\s*[^\n]*✨[^\n]*기능", re.I),
+    re.compile(r"##\s*[^\n]*기능\s*설명", re.I),
+)
+_BOILERPLATE_HEADER = re.compile(
+    r"^##\s*.*(연관\s*된\s*이슈|체크\s*리스트|checklist|review\s*checklist|"
+    r"screenshot|스크린샷|related\s*issue|issue\s*link|"
+    r"원인|예상|참고|리뷰\s*요구|summary\s*by|release\s*notes|"
+    r"coderabbit|auto-generated|internal\s*state)",
+    re.I,
+)
+_GITHUB_HTML_COMMENT = re.compile(r"<!--[\s\S]*?-->", re.MULTILINE)
+_MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+_URL_ONLY_LINE = re.compile(r"^https?://\S+\s*$", re.I)
+_CHECKBOX_ONLY = re.compile(r"^-\s*\[[ xX]\]\s*[\w\s]{0,2}$")
+_LOW_VALUE_COMMENT = re.compile(
+    r"^(lgtm|looks?\s*good|ok\.?|done\.?|merged\.?|approve[d]?\.?|thanks?\.?|"
+    r"thank\s*you\.?|👍|✅|🚀|cc\s*@.+)$",
+    re.I,
+)
+
+
+def _clean_pr_issue_line(line: str) -> Optional[str]:
+    """한 줄 단위 노이즈 제거. None이면 해당 줄 스킵."""
+    line = line.strip()
+    if not line:
+        return None
+    if _BOILERPLATE_HEADER.match(line):
+        return None
+    if _URL_ONLY_LINE.match(line):
+        return None
+    if _CHECKBOX_ONLY.match(line):
+        return None
+    if re.search(r"summary\s*by\s*coderabbit|auto-generated\s*comment", line, re.I):
+        return None
+    if line.startswith(">"):
+        inner = line.lstrip(">").strip()
+        if re.match(r"^(ex\)|이번\s*PR|please|screenshot|image)", inner, re.I):
+            return None
+        line = inner
+    line = _MARKDOWN_IMAGE.sub("", line).strip()
+    line = re.sub(r"https?://\S+", "", line).strip()
+    return line or None
+
+
+def preprocess_pr_issue_body(body: str, *, max_chars: Optional[int] = None) -> str:
+    """PR/Issue 본문에서 템플릿 노이즈를 줄이고 작업·설명 구간 위주로 정리합니다."""
+    limit = GEMINI_SUMMARY_BODY_MAX_CHARS if max_chars is None else max_chars
+    text = str(body or "").replace("\r\n", "\n").strip()
+    if not text:
+        return ""
+
+    text = _GITHUB_HTML_COMMENT.sub("", text).strip()
+
+    extracted = ""
+    for header_pat in _WORK_SECTION_HEADERS:
+        match = header_pat.search(text)
+        if not match:
+            continue
+        start = match.end()
+        rest = text[start:]
+        next_header = re.search(r"\n##\s+", rest)
+        section = rest[: next_header.start()] if next_header else rest
+        section = section.strip()
+        if len(section) >= 8:
+            extracted = section
+            break
+
+    if extracted:
+        text = extracted
+    else:
+        kept: List[str] = []
+        for line in text.split("\n"):
+            cleaned = _clean_pr_issue_line(line)
+            if cleaned is None:
+                continue
+            if cleaned.startswith("##") and _BOILERPLATE_HEADER.search(cleaned):
+                continue
+            kept.append(cleaned)
+        text = "\n".join(kept).strip()
+
+    lines = []
+    for ln in text.split("\n"):
+        cleaned = _clean_pr_issue_line(ln)
+        if cleaned is not None:
+            lines.append(cleaned)
+    text = "\n".join(lines).strip()
+    if limit > 0 and len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
+def _is_low_value_comment(text: str) -> bool:
+    compact = " ".join(str(text or "").split())
+    if len(compact) < 4:
+        return True
+    return bool(_LOW_VALUE_COMMENT.match(compact))
+
+
+def format_summary_comments_for_prompt(
+    comments: List[Any],
+    *,
+    max_chars: Optional[int] = None,
+) -> str:
+    """Gemini PR/Issue 요약 프롬프트용 코멘트 (리뷰 우선, 글자 수 cap). collab_network 와 별개."""
+    limit = GEMINI_SUMMARY_COMMENTS_MAX_CHARS if max_chars is None else max_chars
+    if limit <= 0:
+        return ""
+
+    review_texts: List[str] = []
+    other_texts: List[str] = []
+    for cm in comments or []:
+        text = _comment_body(cm).strip()
+        if not text or _is_low_value_comment(text):
+            continue
+        one_line = " ".join(text.split())
+        is_review = _comment_is_review(cm) or bool(re.search(r"\[review", one_line, re.I))
+        if is_review:
+            review_texts.append(one_line)
+        else:
+            other_texts.append(one_line)
+
+    parts: List[str] = []
+    used = 0
+    for text in review_texts + other_texts:
+        sep = 3 if parts else 0
+        if used + sep + len(text) > limit:
+            remain = limit - used - sep
+            if remain > 48:
+                parts.append(text[: remain - 1] + "…")
+            break
+        parts.append(text)
+        used += sep + len(text)
+    return " | ".join(parts)
+
+
+def _summary_prompt_body(meta: dict) -> str:
+    return preprocess_pr_issue_body(str(meta.get("body") or ""))
+
+
+def _build_pr_issue_prompt_block(kind: str, num: int, meta: dict) -> str:
+    """PR/Issue 작성자가 올린 제목·본문만 Gemini 입력 (댓글·리뷰 제외)."""
+    title = (meta.get("title") or "").strip()
+    body = _summary_prompt_body(meta)
+    label = "PR" if kind == "pr" else "Issue"
+    return f"### {label} #{num}\n제목: {title}\n작업·설명(전처리): {body or '(없음)'}\n"
 
 
 def _api_base() -> str:
@@ -258,7 +416,7 @@ def _collect_pr_issue_catalog(raw_json: dict) -> Tuple[Dict[int, dict], Dict[int
                 prs[num] = {
                     "title": (pr.get("title") or "").strip(),
                     "body": (pr.get("body") or "").strip(),
-                    "comments": flat_comment_texts(pr.get("comments")),
+                    "comments": list(pr.get("comments") or []),
                 }
         for issue in nlp.get("issues", []) or []:
             num = issue.get("issue_number")
@@ -272,33 +430,106 @@ def _collect_pr_issue_catalog(raw_json: dict) -> Tuple[Dict[int, dict], Dict[int
                 issues[num] = {
                     "title": (issue.get("title") or "").strip(),
                     "body": (issue.get("body") or "").strip(),
-                    "comments": flat_comment_texts(issue.get("comments")),
+                    "comments": list(issue.get("comments") or []),
                 }
     return prs, issues
 
 
-def _parse_pr_issue_summaries(raw_text: str, kind: str) -> Dict[int, str]:
+def _summary_looks_like_body_paste(summary: str, title: str) -> bool:
+    """Gemini가 fallback 형태(제목+템플릿/다중 bullet)로 붙인 경우만 재시도."""
+    s = (summary or "").strip()
+    t = (title or "").strip()
+    if not s or not t:
+        return False
+    if not (s.startswith(t + " —") or s.startswith(t + "—")):
+        return False
+    tail = s.split(" — ", 1)[1] if " — " in s else s.split("—", 1)[-1]
+    tail = tail.strip()
+    if tail.startswith("##") or tail.startswith("###") or "#️⃣" in tail[:48]:
+        return True
+    if "\n- " in tail or tail.count("\n") >= 2:
+        return True
+    if tail.startswith("- ") and len(tail) > 72:
+        return True
+    return False
+
+
+def _parse_pr_issue_summaries(
+    raw_text: str,
+    kind: str,
+    *,
+    titles_by_num: Optional[Dict[int, str]] = None,
+    required_nums: Optional[Set[int]] = None,
+) -> Dict[int, str]:
     """kind: 'prs' | 'issues' → {number: summary}"""
-    text = _gemini_strip_code_fence(raw_text)
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError("JSON 객체 없음")
-    data = json.loads(text[start : end + 1])
+    data = _gemini_extract_json_object(raw_text)
     key = "prs" if kind == "prs" else "issues"
     num_key = "pr_number" if kind == "prs" else "issue_number"
+    alt_num_key = "number"
     out: Dict[int, str] = {}
+    titles = titles_by_num or {}
     for item in data.get(key, []) or []:
         if not isinstance(item, dict):
             continue
-        try:
-            num = int(item[num_key])
-        except (TypeError, ValueError, KeyError):
+        num = None
+        for k in (num_key, alt_num_key):
+            if k not in item:
+                continue
+            try:
+                num = int(item[k])
+                break
+            except (TypeError, ValueError):
+                continue
+        if num is None:
             continue
         s = normalize_outline_summary(str(item.get("summary", "") or ""))
-        if s:
-            out[num] = s
+        if not s:
+            continue
+        title = titles.get(num, "")
+        if title and _summary_looks_like_body_paste(s, title):
+            continue
+        out[num] = s
+    if required_nums is not None and not out and required_nums:
+        raise ValueError(f"{kind} JSON 파싱 결과가 비어 있습니다")
     return out
+
+
+def _verify_pr_issue_summary_parser() -> None:
+    """Gemini PR/Issue 파서 회귀 방지 (프로젝트 30 NameError 버그 재발 차단)."""
+    plain = _parse_pr_issue_summaries(
+        '{"prs": [{"pr_number": 1, "summary": "테스트 요약"}]}',
+        "prs",
+    )
+    if plain.get(1) != "테스트 요약":
+        raise RuntimeError("PR/Issue Gemini 파서 smoke test 실패 (plain JSON)")
+    fenced = _parse_pr_issue_summaries(
+        '```json\n{"prs": [{"pr_number": 2, "summary": "펜스 테스트"}]}\n```',
+        "prs",
+    )
+    if fenced.get(2) != "펜스 테스트":
+        raise RuntimeError("PR/Issue Gemini 파서 smoke test 실패 (code fence)")
+    issue = _parse_pr_issue_summaries(
+        '{"issues": [{"issue_number": 3, "summary": "버그 수정"}]}',
+        "issues",
+    )
+    if issue.get(3) != "버그 수정":
+        raise RuntimeError("PR/Issue Gemini 파서 smoke test 실패 (issues key)")
+    titles = {10: "[BE] OAuth"}
+    good = _parse_pr_issue_summaries(
+        '{"prs": [{"pr_number": 10, "summary": "[BE] OAuth — JWT 발급 및 검증"}]}',
+        "prs",
+        titles_by_num=titles,
+    )
+    if good.get(10) != "[BE] OAuth — JWT 발급 및 검증":
+        raise RuntimeError("PR/Issue Gemini 파서 smoke test 실패 (valid em-dash summary)")
+    if not _summary_looks_like_body_paste("[BE] OAuth — ## 🐞 버그 설명", "[BE] OAuth"):
+        raise RuntimeError("body paste 감지 smoke test 실패 (template)")
+    if _summary_looks_like_body_paste("[BE] OAuth — JWT 발급", "[BE] OAuth"):
+        raise RuntimeError("body paste 오탐 (valid short summary)")
+
+
+def _log_pr_issue_fallback(kind: str, num: int, reason: str) -> None:
+    print(f"[gemini-pr-issue] fallback {kind} #{num}: {reason}", file=sys.stderr, flush=True)
 
 
 def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[int, str]]:
@@ -306,6 +537,8 @@ def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[
     prs, issues = _collect_pr_issue_catalog(raw_json)
     if not prs and not issues:
         return {}, {}
+
+    _verify_pr_issue_summary_parser()
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
@@ -329,28 +562,35 @@ def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[
     issue_out: Dict[int, str] = {}
 
     def _pr_prompt_block(num: int) -> str:
-        meta = prs[num]
-        cm = "\n".join(meta["comments"][:15])
-        return f"### PR #{num}\n제목: {meta['title']}\n본문: {meta['body'][:2000]}\n코멘트:\n{cm}\n"
+        return _build_pr_issue_prompt_block("pr", num, prs[num])
 
     def _issue_prompt_block(num: int) -> str:
-        meta = issues[num]
-        cm = "\n".join(meta["comments"][:15])
-        return f"### Issue #{num}\n제목: {meta['title']}\n본문: {meta['body'][:2000]}\n코멘트:\n{cm}\n"
+        return _build_pr_issue_prompt_block("issue", num, issues[num])
+
+    _SUMMARY_RULES = (
+        f"각 summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "
+        '"~했습니다/~합니다/~했다" 종결형 금지. 추측 금지. '
+        "PR/Issue 작성자가 제목·본문에 적은 실제 구현·수정·버그 내용만 요약. "
+        "템플릿·체크리스트·연관 이슈 안내·댓글·리뷰는 무시."
+    )
 
     def _run_pr_chunk(chunk_nums: List[int]) -> Dict[int, str]:
         blocks = [_pr_prompt_block(num) for num in chunk_nums]
         prompt = f"""GitHub PR 요약. 출력은 JSON만:
 {{"prs": [{{"pr_number": 번호, "summary": "개조식 한 줄(명사형)"}}]}}
 
-규칙: 아래 나열된 PR 번호만 모두 포함. 각 summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
+규칙: 아래 나열된 PR 번호만 모두 포함. {_SUMMARY_RULES}
 
 {"".join(blocks)}"""
+        titles = {n: (prs[n].get("title") or "").strip() for n in chunk_nums}
+        required = set(chunk_nums)
         return _gemini_parse_json_with_retries(
             client,
             model_name,
             prompt,
-            lambda raw: _parse_pr_issue_summaries(raw, "prs"),
+            lambda raw, t=titles, req=required: _parse_pr_issue_summaries(
+                raw, "prs", titles_by_num=t, required_nums=req
+            ),
             max_out_tokens=8192,
         )
 
@@ -358,19 +598,26 @@ def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[
         prompt = f"""GitHub PR 요약. 출력은 JSON만:
 {{"prs": [{{"pr_number": {num}, "summary": "개조식 한 줄(명사형)"}}]}}
 
-규칙: summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
+규칙: {_SUMMARY_RULES}
 
 {_pr_prompt_block(num)}"""
+        title = (prs[num].get("title") or "").strip()
         try:
             part = _gemini_parse_json_with_retries(
                 client,
                 model_name,
                 prompt,
-                lambda raw: _parse_pr_issue_summaries(raw, "prs"),
+                lambda raw, n=num, t=title: _parse_pr_issue_summaries(
+                    raw, "prs", titles_by_num={n: t}, required_nums={n}
+                ),
                 max_out_tokens=2048,
             )
-            return part.get(num) or _fallback_pr_issue_summary(prs[num])
-        except Exception:
+            if part.get(num):
+                return part[num]
+            _log_pr_issue_fallback("PR", num, "Gemini 응답에 summary 없음")
+            return _fallback_pr_issue_summary(prs[num])
+        except Exception as exc:
+            _log_pr_issue_fallback("PR", num, str(exc)[:120])
             return _fallback_pr_issue_summary(prs[num])
 
     def _fill_pr_chunk(chunk_nums: List[int], part: Optional[Dict[int, str]] = None) -> None:
@@ -389,7 +636,8 @@ def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[
             try:
                 part = _run_pr_chunk(chunk)
                 _fill_pr_chunk(chunk, part)
-            except Exception:
+            except Exception as exc:
+                _log_pr_issue_fallback("PR-chunk", chunk[0], str(exc)[:120])
                 _fill_pr_chunk(chunk, None)
 
     def _run_issue_chunk(chunk_nums: List[int]) -> Dict[int, str]:
@@ -397,14 +645,18 @@ def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[
         prompt = f"""GitHub Issue 요약. 출력은 JSON만:
 {{"issues": [{{"issue_number": 번호, "summary": "개조식 한 줄(명사형)"}}]}}
 
-규칙: 아래 나열된 Issue 번호만 모두 포함. 각 summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
+규칙: 아래 나열된 Issue 번호만 모두 포함. {_SUMMARY_RULES}
 
 {"".join(blocks)}"""
+        titles = {n: (issues[n].get("title") or "").strip() for n in chunk_nums}
+        required = set(chunk_nums)
         return _gemini_parse_json_with_retries(
             client,
             model_name,
             prompt,
-            lambda raw: _parse_pr_issue_summaries(raw, "issues"),
+            lambda raw, t=titles, req=required: _parse_pr_issue_summaries(
+                raw, "issues", titles_by_num=t, required_nums=req
+            ),
             max_out_tokens=8192,
         )
 
@@ -412,19 +664,26 @@ def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[
         prompt = f"""GitHub Issue 요약. 출력은 JSON만:
 {{"issues": [{{"issue_number": {num}, "summary": "개조식 한 줄(명사형)"}}]}}
 
-규칙: summary는 개조식 한 줄(명사형), {GEMINI_SUMMARY_MAX_CHARS}자 이내. "~했습니다/~합니다/~했다" 종결형 금지. 추측 금지.
+규칙: {_SUMMARY_RULES}
 
 {_issue_prompt_block(num)}"""
+        title = (issues[num].get("title") or "").strip()
         try:
             part = _gemini_parse_json_with_retries(
                 client,
                 model_name,
                 prompt,
-                lambda raw: _parse_pr_issue_summaries(raw, "issues"),
+                lambda raw, n=num, t=title: _parse_pr_issue_summaries(
+                    raw, "issues", titles_by_num={n: t}, required_nums={n}
+                ),
                 max_out_tokens=2048,
             )
-            return part.get(num) or _fallback_pr_issue_summary(issues[num])
-        except Exception:
+            if part.get(num):
+                return part[num]
+            _log_pr_issue_fallback("Issue", num, "Gemini 응답에 summary 없음")
+            return _fallback_pr_issue_summary(issues[num])
+        except Exception as exc:
+            _log_pr_issue_fallback("Issue", num, str(exc)[:120])
             return _fallback_pr_issue_summary(issues[num])
 
     def _fill_issue_chunk(chunk_nums: List[int], part: Optional[Dict[int, str]] = None) -> None:
@@ -443,26 +702,43 @@ def run_gemini_pr_issue_summaries(raw_json: dict) -> Tuple[Dict[int, str], Dict[
             try:
                 part = _run_issue_chunk(chunk)
                 _fill_issue_chunk(chunk, part)
-            except Exception:
+            except Exception as exc:
+                _log_pr_issue_fallback("Issue-chunk", chunk[0], str(exc)[:120])
                 _fill_issue_chunk(chunk, None)
 
     for n, meta in prs.items():
-        pr_out.setdefault(n, _fallback_pr_issue_summary(meta))
+        if n not in pr_out:
+            pr_out[n] = _fallback_pr_issue_summary(meta)
+            _log_pr_issue_fallback("PR", n, "최종 누락")
     for n, meta in issues.items():
-        issue_out.setdefault(n, _fallback_pr_issue_summary(meta))
+        if n not in issue_out:
+            issue_out[n] = _fallback_pr_issue_summary(meta)
+            _log_pr_issue_fallback("Issue", n, "최종 누락")
+
+    pr_fb = sum(1 for n, m in prs.items() if pr_out.get(n) == _fallback_pr_issue_summary(m))
+    iss_fb = sum(1 for n, m in issues.items() if issue_out.get(n) == _fallback_pr_issue_summary(m))
+    if prs or issues:
+        print(
+            f"[gemini-pr-issue] 완료: PR {len(prs)}건 (fallback {pr_fb}), "
+            f"Issue {len(issues)}건 (fallback {iss_fb})",
+            flush=True,
+        )
 
     return pr_out, issue_out
 
 
 def _fallback_pr_issue_summary(meta: dict) -> str:
     title = (meta.get("title") or "").strip()
-    body = (meta.get("body") or "").strip()
+    body = preprocess_pr_issue_body(
+        str(meta.get("body") or ""),
+        max_chars=GEMINI_SUMMARY_FALLBACK_BODY_CHARS,
+    )
     if title and body:
-        text = normalize_outline_summary(f"{title} — {body[:120]}")
+        text = normalize_outline_summary(f"{title} — {body}")
     elif title:
         text = normalize_outline_summary(title)
     elif body:
-        text = normalize_outline_summary(body[:200])
+        text = normalize_outline_summary(body)
     else:
         text = "(요약할 본문 없음)"
     if len(text) > GEMINI_SUMMARY_MAX_CHARS:

@@ -59,7 +59,7 @@ pip install -r requirements.txt
 | `PROJECT_ID` | 아니오 | — | `--project-id` 대신 사용 가능 |
 | `POST_AI_ANALYSIS` | 아니오 | `1` | `0`이면 POST 생략 (`--no-post`와 유사) |
 | `GEMINI_MODEL` | 아니오 | `gemini-2.5-flash` | Gemini 모델 이름 |
-| `GEMINI_PR_ISSUE_CHUNK` | 아니오 | `12` | PR/Issue 요약 배치 크기 |
+| `GEMINI_PR_ISSUE_CHUNK` | 아니오 | `8` | PR/Issue 요약 배치 크기 |
 | `GEMINI_MAX_COMMITS_PER_USER` | 아니오 | `80` | 사용자당 Gemini에 넣을 최대 커밋 수 |
 | `HF_TOKEN` | 아니오 | — | HuggingFace 토큰 (모델 다운로드 속도·할당량 개선) |
 
@@ -136,7 +136,8 @@ capstone2/
 ├── ai_engine.py            # 점수 계산, BGE 협업 NLP, Gemini 사용자/커밋 요약
 ├── ai_analysis_api.py      # collab_network, PR/Issue Gemini, 백엔드 POST
 ├── requirements.txt
-└── README.md
+├── README_AI.md
+└── PROJECT_TECHNICAL_GUIDE.txt
 ```
 
 실험·디버깅용 노트북(`analysis_test.ipynb` 등)은 파이프라인 실행에 **필수는 아닙니다.**
@@ -147,10 +148,20 @@ capstone2/
 |------|------|
 | `quant_score` | 커밋, PR, 이슈, 리뷰, LOC 등 정량 지표 (팀 내 상대 평가) |
 | `collab_score` | BGE-M3 임베딩 + 루브릭 기반 협업 NLP 점수 |
-| `static_score` | `backend_code_score` (없으면 기본 70점) |
-| `final_score` | `0.2×quant + 0.5×collab + 0.3×static` |
+| `static_score` | `backend_code_score`만 사용. 코드 활동 없거나 점수 null이면 **0점** |
+| `final_score` | `0.2×quant + 0.6×collab + 0.2×static` (무활동 시 0) |
 
 POST body의 `qualitative_score`는 `collab_score`와 동일합니다.
+
+### Gemini 입력 범위 (요약용)
+
+| 대상 | Gemini에 넣는 텍스트 |
+|------|----------------------|
+| 사용자 overall | 커밋 메시지 + PR/Issue **제목·본문** (댓글 제외) |
+| 커밋별 요약 | 커밋 메시지만 |
+| PR/Issue POST 요약 | 작성자 **제목·본문** (댓글·리뷰 제외) |
+
+`collab_score`(BGE NLP)는 PR/Issue **댓글까지** 포함해 평가합니다. 요약과 점수의 입력 범위가 다릅니다.
 
 ## 백엔드 API
 
