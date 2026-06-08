@@ -161,12 +161,16 @@ DOC_OR_CONFIG_FILENAMES = (
     'requirements.txt',
     'requirements-dev.txt',
     '.gitignore',
+    '.gitattributes',
+    '.editorconfig',
     '.classpath',
     '.project',
     '.factorypath',
     'pom.xml',
     'build.gradle',
+    'build.gradle.kts',
     'settings.gradle',
+    'settings.gradle.kts',
     'gradle.properties'
 )
 
@@ -261,7 +265,9 @@ PACKAGE_METADATA_FILES = (
     'setup.cfg',
     'pyproject.toml',
     'manifest.in',
-    'project.pbxproj'
+    'project.pbxproj',
+    'build.gradle',
+    'build.gradle.kts'
 )
 
 PACKAGE_METADATA_MESSAGE_PHRASES = (
@@ -272,6 +278,11 @@ PACKAGE_METADATA_MESSAGE_PHRASES = (
     'prepare release',
     'version update',
     'update version',
+    'set version',
+    'app version',
+    '버전 코드',
+    '버전코드',
+    '앱 버전',
     'readme',
     'typo',
     'docs',
@@ -282,6 +293,10 @@ PACKAGE_METADATA_MESSAGE_PHRASES = (
 
 PACKAGE_METADATA_DIFF_KEYWORDS = (
     'version',
+    'versioncode',
+    'versionname',
+    'version_code',
+    'version_name',
     'marketing_version',
     'current_project_version',
     'description',
@@ -1325,7 +1340,7 @@ Do not invent missing information.
 - Do not assign a numeric score only because the change appears in a backend file such as app.py.
 
 4-2. package_metadata_only
-- Treat package version bumps, release metadata, setup.py/setup.cfg/pyproject.toml metadata-only changes as outside static source-code quality scoring.
+Treat app/package version bumps, release metadata, Gradle/Xcode project version metadata, and setup.py/setup.cfg/pyproject.toml metadata-only changes as outside static source-code quality scoring.
 - commit_summary: create a concise summary of the package version or metadata update.
 - commit_backend_score: null.
 - analysis_status: "skipped".
