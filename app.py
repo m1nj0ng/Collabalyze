@@ -260,7 +260,8 @@ PACKAGE_METADATA_FILES = (
     'setup.py',
     'setup.cfg',
     'pyproject.toml',
-    'manifest.in'
+    'manifest.in',
+    'project.pbxproj'
 )
 
 PACKAGE_METADATA_MESSAGE_PHRASES = (
@@ -281,6 +282,8 @@ PACKAGE_METADATA_MESSAGE_PHRASES = (
 
 PACKAGE_METADATA_DIFF_KEYWORDS = (
     'version',
+    'marketing_version',
+    'current_project_version',
     'description',
     'download_url',
     'keywords',
@@ -1847,7 +1850,7 @@ def build_policy_based_summary(commit, classification):
         return "프론트엔드 연동 테스트를 위해 리다이렉트 URL 또는 환경값을 조정함."
     
     if estimated_type == "package_metadata_only":
-        return "패키지 버전 또는 배포 메타데이터를 갱신함."
+        return "앱/패키지 버전 또는 배포 메타데이터를 갱신함."
     
     if estimated_type == "test_only":
         return "테스트 코드 중심의 변경을 반영함."
@@ -1925,7 +1928,7 @@ def build_policy_based_analysis_result(commit, classification=None):
         score_reason = "환경값 또는 URL 수준의 변경으로 정적 코드 품질 점수 산정에서 제외함."
     elif estimated_type == "package_metadata_only":
         analysis_status = "skipped"
-        score_reason = "패키지 메타데이터 변경으로 정적 코드 품질 점수 산정에서 제외함."
+        score_reason = "앱/패키지 메타데이터 변경으로 정적 코드 품질 점수 산정에서 제외함."
     elif estimated_type == "test_only":
         analysis_status = "skipped"
         score_reason = "테스트 코드 전용 변경으로 정적 코드 품질 점수 산정에서 제외함."
