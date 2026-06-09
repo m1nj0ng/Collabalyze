@@ -14,50 +14,77 @@ const ComparePage = () => {
   useEffect(() => { window.scrollTo(0, 0); }, []);
 
   const members = location.state?.members;
-  if (!members || members.length !== 2) {
+  if (!members || members.length < 2) {
     return (
       <div style={{ padding: '40px', textAlign: 'center', fontFamily: '"Inter", sans-serif' }}>
         <h2 style={{ color: '#ef4444' }}>잘못된 접근입니다.</h2>
-        <p>대시보드에서 비교할 팀원 2명을 선택해주세요.</p>
+        <p>대시보드에서 비교할 팀원을 2명 이상 선택해주세요.</p>
         <button onClick={() => navigate(-1)} style={{ padding: '10px 20px', background: '#1e293b', color: '#fff', borderRadius: '8px', border: 'none', cursor: 'pointer' }}>돌아가기</button>
       </div>
     );
   }
 
-  const [m1, m2] = members;
-  const COLORS = ['#4f46e5', '#10b981']; // m1: Indigo, m2: Emerald
+  const COLORS = ['#4f46e5', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 
   // 멤버 페르소나 및 점수 가져오기
   const getMemberPersona = (member) => {
-    if (member.score >= 95) return { label: '핵심 아키텍트', color: '#4f46e5', bg: '#eef2ff' };
-    if (member.score >= 90) return { label: '핵심 기여자', color: '#166534', bg: '#dcfce7' };
-    if (member.issues >= 15) return { label: '버그 헌터', color: '#991b1b', bg: '#fee2e2' };
-    if (member.reviews >= 25) return { label: '전문 리뷰어', color: '#075985', bg: '#e0f2fe' };
-    if (member.commits >= 100) return { label: '코드 머신', color: '#854d0e', bg: '#fef9c3' };
-    if (!member.score) return { label: '분석 대기 중', color: '#64748b', bg: '#f1f5f9' };
+    const { score = 0, collaborationScore = 0, backendCodeScore = 0, commits = 0, pullRequests = 0, reviews = 0, issues = 0 } = member;
+    if (!score) return { label: '분석 대기 중', color: '#64748b', bg: '#f1f5f9' };
+
+    const totalActivities = commits + pullRequests + reviews + issues;
+
+    if (backendCodeScore >= 90 && score >= 85) return { label: '핵심 아키텍트', color: '#4f46e5', bg: '#eef2ff' };
+    if ((reviews > 0 && reviews / (totalActivities || 1) >= 0.25) || collaborationScore >= 90) return { label: '전문 리뷰어', color: '#075985', bg: '#e0f2fe' };
+    if (issues > 0 && issues / (totalActivities || 1) >= 0.2) return { label: '버그 헌터', color: '#991b1b', bg: '#fee2e2' };
+    if (pullRequests > 0 && pullRequests / (totalActivities || 1) >= 0.2) return { label: '핵심 기여자', color: '#166534', bg: '#dcfce7' };
+    if (score >= 80) return { label: '올라운더', color: '#0d9488', bg: '#ecfdf5' };
+    if (commits > 0 && commits / (totalActivities || 1) >= 0.75) return { label: '코드 머신', color: '#854d0e', bg: '#fef9c3' };
+    
     return { label: '안정적 협업자', color: '#0369a1', bg: '#e0f2fe' };
   };
 
   // 단일 레이더 데이터 연산
-  const getRadarData = (m) => [
-    { subject: '구현력', value: Math.min(100, (m.commits || 0) * 1.5 + 50) },
-    { subject: '설계 능력', value: Math.min(100, (m.score || 60) + 10) },
-    { subject: '소통/리뷰', value: Math.min(100, (m.reviews || 0) * 3 + 50) },
-    { subject: '문서화', value: 75 },
-    { subject: '문제해결', value: Math.min(100, (m.issues || 0) * 4 + 50) },
-  ];
+  const getRadarData = (m) => {
+    const teamMembers = members || [m];
+
+    const maxCommits = Math.max(...teamMembers.map(mem => (mem.commits || 0) + (mem.pullRequests || 0)), 1);
+    const maxReviews = Math.max(...teamMembers.map(mem => mem.reviews || 0), 1);
+    const maxIssues = Math.max(...teamMembers.map(mem => mem.issues || 0), 1);
+    const maxBackendScore = Math.max(...teamMembers.map(mem => mem.backendCodeScore || 0), 1);
+    const maxCollabScore = Math.max(...teamMembers.map(mem => mem.collaborationScore || 0), 1);
+
+    const { commits = 0, pullRequests = 0, reviews = 0, issues = 0, score = 0, backendCodeScore = 0, collaborationScore = 0 } = m;
+    
+    const base = 15;
+    const scale = 85;
+    
+    const implementation = base + (((commits + pullRequests) / maxCommits) * scale);
+    const design = base + (((backendCodeScore || 0) / maxBackendScore) * scale);
+    const communication = base + ((reviews / maxReviews) * 0.7 + ((collaborationScore || 0) / maxCollabScore) * 0.3) * scale;
+    const documentation = base + (((collaborationScore || 0) / maxCollabScore) * 0.6 + (((pullRequests + issues) / (maxCommits + maxIssues))) * 0.4) * scale;
+    const problemSolving = base + ((issues / maxIssues) * scale);
+
+    return [
+      { subject: '구현력', value: Math.min(100, Math.round(implementation)) },
+      { subject: '설계 능력', value: Math.min(100, Math.round(design)) },
+      { subject: '소통/리뷰', value: Math.min(100, Math.round(communication)) },
+      { subject: '문서화', value: Math.min(100, Math.round(documentation)) },
+      { subject: '문제해결', value: Math.min(100, Math.round(problemSolving)) },
+    ];
+  };
 
   // 1. 합쳐진 레이더 데이터 (오버랩)
   const combinedRadarData = useMemo(() => {
-    const r1 = getRadarData(m1);
-    const r2 = getRadarData(m2);
-    return r1.map((item, i) => ({
-      subject: item.subject,
-      [m1.name]: item.value,
-      [m2.name]: r2[i].value,
-      fullMark: 100
-    }));
-  }, [m1, m2]);
+    const radarDataList = members.map(m => getRadarData(m));
+    const subjects = ['구현력', '설계 능력', '소통/리뷰', '문서화', '문제해결'];
+    return subjects.map((subject, index) => {
+      const row = { subject, fullMark: 100 };
+      members.forEach((m, mIdx) => {
+        row[m.name] = radarDataList[mIdx][index].value;
+      });
+      return row;
+    });
+  }, [members]);
 
   // 타임라인 병합 및 정렬 헬퍼
   const generateTimeline = (commits) => {
@@ -92,23 +119,27 @@ const ComparePage = () => {
 
   // 2. 합쳐진 타임라인 데이터 (멀티 라인)
   const mergedTimelineData = useMemo(() => {
-    const t1 = generateTimeline(m1.rawCommits || []);
-    const t2 = generateTimeline(m2.rawCommits || []);
+    const timelines = members.map(m => generateTimeline(m.rawCommits || []));
     const merged = {};
 
     ['monthly', 'weekly', 'daily'].forEach(period => {
-      const d1 = t1[period] || [];
-      const d2 = t2[period] || [];
-      const allDates = Array.from(new Set([...d1.map(d => d.date), ...d2.map(d => d.date)])).sort();
+      const allDatesSet = new Set();
+      timelines.forEach(t => {
+        (t[period] || []).forEach(d => allDatesSet.add(d.date));
+      });
+      const allDates = Array.from(allDatesSet).sort();
       
       merged[period] = allDates.map(date => {
-        const val1 = d1.find(d => d.date === date)?.commits || 0;
-        const val2 = d2.find(d => d.date === date)?.commits || 0;
-        return { date, [m1.name]: val1, [m2.name]: val2 };
+        const row = { date };
+        members.forEach((m, mIdx) => {
+          const found = (timelines[mIdx][period] || []).find(d => d.date === date);
+          row[m.name] = found ? found.commits : 0;
+        });
+        return row;
       });
     });
     return merged;
-  }, [m1, m2]);
+  }, [members]);
 
   const timelineScrollRef = useRef(null);
   const currentTimelineData = mergedTimelineData[timeUnit] || [];
@@ -119,6 +150,14 @@ const ComparePage = () => {
       timelineScrollRef.current.scrollLeft = timelineScrollRef.current.scrollWidth;
     }
   }, [currentTimelineData, timeUnit]);
+
+  const maxStats = useMemo(() => ({
+    score: Math.max(...members.map(m => m.score || 0), 0),
+    commits: Math.max(...members.map(m => m.commits || 0), 0),
+    pullRequests: Math.max(...members.map(m => m.pullRequests || 0), 0),
+    reviews: Math.max(...members.map(m => m.reviews || 0), 0),
+    issues: Math.max(...members.map(m => m.issues || 0), 0),
+  }), [members]);
 
   // 카드 컴포넌트 분리
   const MemberCard = ({ member, color }) => {
@@ -159,10 +198,11 @@ const ComparePage = () => {
           </button>
         </header>
 
-        {/* 멤버 요약 카드 (나란히) */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px' }}>
-          <MemberCard member={m1} color={COLORS[0]} />
-          <MemberCard member={m2} color={COLORS[1]} />
+        {/* 멤버 요약 카드 */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '30px' }}>
+          {members.map((m, idx) => (
+            <MemberCard key={m.id || idx} member={m} color={COLORS[idx % COLORS.length]} />
+          ))}
         </div>
 
         {/* 차트 영역 (레이더 차트 & 타임라인 병합) */}
@@ -177,8 +217,9 @@ const ComparePage = () => {
                   <PolarGrid stroke="#e2e8f0" />
                   <PolarAngleAxis dataKey="subject" tick={{ fill: '#475569', fontSize: 13, fontWeight: 600 }} />
                   <PolarRadiusAxis angle={30} domain={[0, 100]} tick={false} axisLine={false} />
-                  <Radar name={m1.name} dataKey={m1.name} stroke={COLORS[0]} strokeWidth={2} fill={COLORS[0]} fillOpacity={0.3} />
-                  <Radar name={m2.name} dataKey={m2.name} stroke={COLORS[1]} strokeWidth={2} fill={COLORS[1]} fillOpacity={0.3} />
+                  {members.map((m, idx) => (
+                    <Radar key={m.id || idx} name={m.name} dataKey={m.name} stroke={COLORS[idx % COLORS.length]} strokeWidth={2} fill={COLORS[idx % COLORS.length]} fillOpacity={0.3} />
+                  ))}
                   <Legend verticalAlign="top" height={30} iconType="circle" />
                 </RadarChart>
               </ResponsiveContainer>
@@ -205,8 +246,9 @@ const ComparePage = () => {
                   <YAxis tick={{ fontSize: 12, fill: '#64748b' }} axisLine={false} tickLine={false} />
                   <RechartsTooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }} />
                   <Legend verticalAlign="top" height={30} iconType="circle" />
-                  <Line type="monotone" dataKey={m1.name} stroke={COLORS[0]} strokeWidth={3} dot={{ r: 4, fill: COLORS[0], strokeWidth: 0 }} />
-                  <Line type="monotone" dataKey={m2.name} stroke={COLORS[1]} strokeWidth={3} dot={{ r: 4, fill: COLORS[1], strokeWidth: 0 }} />
+                  {members.map((m, idx) => (
+                    <Line key={m.id || idx} type="monotone" dataKey={m.name} stroke={COLORS[idx % COLORS.length]} strokeWidth={3} dot={{ r: 4, fill: COLORS[idx % COLORS.length], strokeWidth: 0 }} />
+                  ))}
                 <Brush 
                   dataKey="date" 
                   height={20} 
@@ -223,25 +265,41 @@ const ComparePage = () => {
 
         </div>
 
-        {/* NLP 분석 결과 나란히 보기 */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px', marginTop: '30px' }}>
-          {[m1, m2].map((m, idx) => (
-            <div key={m.id} style={{ padding: '25px', backgroundColor: '#ffffff', borderRadius: '16px', borderTop: `4px solid ${COLORS[idx]}`, boxShadow: '0 1px 3px rgba(0,0,0,0.1)', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        {/* NLP 분석 결과 다중 보기 */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '30px', marginTop: '30px' }}>
+          {members.map((m, idx) => (
+            <div key={m.id || idx} style={{ padding: '25px', backgroundColor: '#ffffff', borderRadius: '16px', borderTop: `4px solid ${COLORS[idx % COLORS.length]}`, boxShadow: '0 1px 3px rgba(0,0,0,0.1)', display: 'flex', flexDirection: 'column', gap: '20px' }}>
               <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#1e293b' }}>{m.name}의 협업 스타일</h3>
               
               <div>
                 <p style={{ margin: '0 0 8px 0', fontSize: '0.95rem', color: '#1e293b', fontWeight: '700' }}>🛠 개발 스타일</p>
                 <p style={{ margin: 0, color: '#475569', lineHeight: '1.6', fontSize: '0.9rem' }}>{m.codeAnalysis || "코드 분석 결과가 아직 제공되지 않았습니다."}</p>
                 <p style={{ margin: '4px 0 0 0', color: '#475569', lineHeight: '1.6', fontSize: '0.9rem' }}>{m.analysis?.expertise}</p>
+              <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
+                <span style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>총 기여 {m.score || 0}점</span>
+                <span style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>총 커밋 {m.commits || 0}회</span>
+                {(m.score || 0) > 0 && (m.score || 0) === maxStats.score && <span style={{ padding: '4px 10px', backgroundColor: '#fef9c3', color: '#854d0e', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #fde047' }}>점수 1위</span>}
+                {(m.commits || 0) > 0 && (m.commits || 0) === maxStats.commits && <span style={{ padding: '4px 10px', backgroundColor: '#dcfce7', color: '#166534', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #bbf7d0' }}>커밋 1위</span>}
+              </div>
               </div>
               <div>
                 <p style={{ margin: '0 0 8px 0', fontSize: '0.95rem', color: '#1e293b', fontWeight: '700' }}>💬 협업 매너</p>
                 <p style={{ margin: 0, color: '#475569', lineHeight: '1.6', fontSize: '0.9rem' }}>{m.commitAnalysis || "커밋 히스토리를 분석 중입니다."}</p>
                 <p style={{ margin: '4px 0 0 0', color: '#475569', lineHeight: '1.6', fontSize: '0.9rem' }}>{m.analysis?.collaboration}</p>
+              <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
+                <span style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>코드 리뷰 {m.reviews || 0}회</span>
+                <span style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>PR 생성 {m.pullRequests || 0}건</span>
+                {(m.reviews || 0) > 0 && (m.reviews || 0) === maxStats.reviews && <span style={{ padding: '4px 10px', backgroundColor: '#e0f2fe', color: '#0369a1', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #bae6fd' }}>리뷰 1위</span>}
+                {(m.pullRequests || 0) > 0 && (m.pullRequests || 0) === maxStats.pullRequests && <span style={{ padding: '4px 10px', backgroundColor: '#eef2ff', color: '#4f46e5', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #c7d2fe' }}>PR 1위</span>}
+              </div>
               </div>
               <div>
                 <p style={{ margin: '0 0 8px 0', fontSize: '0.95rem', color: '#1e293b', fontWeight: '700' }}>⏱ 작업 습관</p>
                 <p style={{ margin: 0, color: '#475569', lineHeight: '1.6', fontSize: '0.9rem' }}>{m.analysis?.habit || "작업 습관을 파악 중입니다."}</p>
+              <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
+                <span style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>참여 이슈 {m.issues || 0}건</span>
+                {(m.issues || 0) > 0 && (m.issues || 0) === maxStats.issues && <span style={{ padding: '4px 10px', backgroundColor: '#fee2e2', color: '#b91c1c', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #fecaca' }}>이슈 처리 1위</span>}
+              </div>
               </div>
             </div>
           ))}

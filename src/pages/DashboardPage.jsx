@@ -24,12 +24,18 @@ const DashboardPage = () => {
 
   // 역할 판별 로직 (Persona Logic)
   const getMemberPersona = (member) => {
-    if (member.score >= 95) return { label: '핵심 아키텍트', color: '#4f46e5', bg: '#eef2ff' };
-    if (member.score >= 90) return { label: '핵심 기여자', color: '#166534', bg: '#dcfce7' };
-    if (member.issues >= 15) return { label: '버그 헌터', color: '#991b1b', bg: '#fee2e2' };
-    if (member.reviews >= 25) return { label: '전문 리뷰어', color: '#075985', bg: '#e0f2fe' };
-    if (member.commits >= 100) return { label: '코드 머신', color: '#854d0e', bg: '#fef9c3' };
-    if (!member.score) return { label: '분석 대기 중', color: '#64748b', bg: '#f1f5f9' }; // 분석 완료 전 처리
+    const { score = 0, collaborationScore = 0, backendCodeScore = 0, commits = 0, pullRequests = 0, reviews = 0, issues = 0 } = member;
+    if (!score) return { label: '분석 대기 중', color: '#64748b', bg: '#f1f5f9' }; // 분석 완료 전 처리
+
+    const totalActivities = commits + pullRequests + reviews + issues;
+
+    if (backendCodeScore >= 90 && score >= 85) return { label: '핵심 아키텍트', color: '#4f46e5', bg: '#eef2ff' };
+    if ((reviews > 0 && reviews / (totalActivities || 1) >= 0.25) || collaborationScore >= 90) return { label: '전문 리뷰어', color: '#075985', bg: '#e0f2fe' };
+    if (issues > 0 && issues / (totalActivities || 1) >= 0.2) return { label: '버그 헌터', color: '#991b1b', bg: '#fee2e2' };
+    if (pullRequests > 0 && pullRequests / (totalActivities || 1) >= 0.2) return { label: '핵심 기여자', color: '#166534', bg: '#dcfce7' };
+    if (score >= 80) return { label: '올라운더', color: '#0d9488', bg: '#ecfdf5' };
+    if (commits > 0 && commits / (totalActivities || 1) >= 0.75) return { label: '코드 머신', color: '#854d0e', bg: '#fef9c3' };
+    
     return { label: '안정적 협업자', color: '#0369a1', bg: '#e0f2fe' };
   };
 
@@ -181,8 +187,8 @@ const DashboardPage = () => {
     setSelectedForCompare(prev => {
       const isSelected = prev.some(m => m.id === member.id);
       if (isSelected) return prev.filter(m => m.id !== member.id);
-      if (prev.length >= 2) {
-        alert('비교 모드는 최대 2명까지만 선택할 수 있습니다.');
+      if (prev.length >= 5) {
+        alert('비교 모드는 최대 5명까지만 선택할 수 있습니다.');
         return prev;
       }
       return [...prev, member];
@@ -190,8 +196,8 @@ const DashboardPage = () => {
   };
 
   const goToCompare = () => {
-    if (selectedForCompare.length !== 2) {
-      alert('비교할 팀원 2명을 선택해주세요.');
+    if (selectedForCompare.length < 2) {
+      alert('비교할 팀원을 2명 이상 선택해주세요.');
       return;
     }
     navigate('/compare', { state: { members: selectedForCompare } });
@@ -286,11 +292,11 @@ const DashboardPage = () => {
                 onClick={goToCompare}
                 style={{
                   padding: '8px 16px',
-                  backgroundColor: selectedForCompare.length === 2 ? '#10b981' : '#94a3b8',
+                  backgroundColor: selectedForCompare.length >= 2 ? '#10b981' : '#94a3b8',
                   color: '#ffffff',
                   border: 'none',
                   borderRadius: '8px',
-                  cursor: selectedForCompare.length === 2 ? 'pointer' : 'not-allowed',
+                  cursor: selectedForCompare.length >= 2 ? 'pointer' : 'not-allowed',
                   fontSize: '0.9rem',
                   fontWeight: '600',
                   transition: 'background 0.2s'
@@ -337,7 +343,7 @@ const DashboardPage = () => {
                       />
                     </td>
                     <td style={{ padding: '16px 24px' }}>
-                      <button onClick={() => navigate(`/detail/${member.id}`, { state: { member } })} style={{ padding: '8px 14px', backgroundColor: '#4f46e5', color: '#ffffff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem', fontWeight: '600', transition: 'background 0.2s' }}>인사이트 보기</button>
+                      <button onClick={() => navigate(`/detail/${member.id}`, { state: { member, allMembers: dashboardData } })} style={{ padding: '8px 14px', backgroundColor: '#4f46e5', color: '#ffffff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem', fontWeight: '600', transition: 'background 0.2s' }}>인사이트 보기</button>
                     </td>
                   </tr>
                 ))}

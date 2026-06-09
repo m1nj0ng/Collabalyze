@@ -117,14 +117,21 @@ const DetailPage = () => {
   }, []);
 
   const realMember = location.state?.member;
+  const allMembers = location.state?.allMembers;
 
   const getMemberPersona = (memberData) => {
-    if (memberData.score >= 95) return { label: '핵심 아키텍트', color: '#4f46e5', bg: '#eef2ff' };
-    if (memberData.score >= 90) return { label: '핵심 기여자', color: '#166534', bg: '#dcfce7' };
-    if (memberData.issues >= 15) return { label: '버그 헌터', color: '#991b1b', bg: '#fee2e2' };
-    if (memberData.reviews >= 25) return { label: '전문 리뷰어', color: '#075985', bg: '#e0f2fe' };
-    if (memberData.commits >= 100) return { label: '코드 머신', color: '#854d0e', bg: '#fef9c3' };
-    if (!memberData.score) return { label: '분석 대기 중', color: '#64748b', bg: '#f1f5f9' };
+    const { score = 0, collaborationScore = 0, backendCodeScore = 0, commits = 0, pullRequests = 0, reviews = 0, issues = 0 } = memberData;
+    if (!score) return { label: '분석 대기 중', color: '#64748b', bg: '#f1f5f9' };
+
+    const totalActivities = commits + pullRequests + reviews + issues;
+
+    if (backendCodeScore >= 90 && score >= 85) return { label: '핵심 아키텍트', color: '#4f46e5', bg: '#eef2ff' };
+    if ((reviews > 0 && reviews / (totalActivities || 1) >= 0.25) || collaborationScore >= 90) return { label: '전문 리뷰어', color: '#075985', bg: '#e0f2fe' };
+    if (issues > 0 && issues / (totalActivities || 1) >= 0.2) return { label: '버그 헌터', color: '#991b1b', bg: '#fee2e2' };
+    if (pullRequests > 0 && pullRequests / (totalActivities || 1) >= 0.2) return { label: '핵심 기여자', color: '#166534', bg: '#dcfce7' };
+    if (score >= 80) return { label: '올라운더', color: '#0d9488', bg: '#ecfdf5' };
+    if (commits > 0 && commits / (totalActivities || 1) >= 0.75) return { label: '코드 머신', color: '#854d0e', bg: '#fef9c3' };
+    
     return { label: '안정적 협업자', color: '#0369a1', bg: '#e0f2fe' };
   };
 
@@ -427,17 +434,47 @@ const DetailPage = () => {
   };
 
   // 실제 회원의 데이터를 기반으로 레이더 차트 동적 생성 로직
-  const generateRadarData = (memberStats) => {
+  const generateRadarData = (memberStats, teamMembers) => {
     if (!memberStats) return baseMember.radarData || [];
-    // API에서 세부 항목이 아직 없다면 기존 정량 지표를 100점 만점으로 스케일링하여 임시 표출
+    const membersToCompare = teamMembers && teamMembers.length > 0 ? teamMembers : [memberStats];
+
+    // 팀 내 최고점 계산
+    const maxCommits = Math.max(...membersToCompare.map(m => (m.commits || 0) + (m.pullRequests || 0)), 1);
+    const maxReviews = Math.max(...membersToCompare.map(m => m.reviews || 0), 1);
+    const maxIssues = Math.max(...membersToCompare.map(m => m.issues || 0), 1);
+    const maxBackendScore = Math.max(...membersToCompare.map(m => m.backendCodeScore || 0), 1);
+    const maxCollabScore = Math.max(...membersToCompare.map(m => m.collaborationScore || 0), 1);
+    
+    const { commits = 0, pullRequests = 0, reviews = 0, issues = 0, score = 0, backendCodeScore = 0, collaborationScore = 0 } = memberStats;
+    
+    const base = 15; // 변별력을 위해 기본 점수 하향
+    const scale = 85; // 점수 범위를 15-100으로 매핑
+    
+    const implementation = base + (((commits + pullRequests) / maxCommits) * scale);
+    const design = base + (((backendCodeScore || 0) / maxBackendScore) * scale);
+    const communication = base + ((reviews / maxReviews) * 0.7 + ((collaborationScore || 0) / maxCollabScore) * 0.3) * scale;
+    const documentation = base + (((collaborationScore || 0) / maxCollabScore) * 0.6 + (((pullRequests + issues) / (maxCommits + maxIssues))) * 0.4) * scale;
+    const problemSolving = base + ((issues / maxIssues) * scale);
+
     return [
-      { subject: '구현력', A: Math.min(100, (memberStats.commits || 0) * 1.5 + 50), fullMark: 100 },
-      { subject: '설계 능력', A: Math.min(100, (memberStats.score || 60) + 10), fullMark: 100 },
-      { subject: '소통/리뷰', A: Math.min(100, (memberStats.reviews || 0) * 3 + 50), fullMark: 100 },
-      { subject: '문서화', A: 75, fullMark: 100 }, // 추후 백엔드에서 PR 바디 길이 등으로 추론 가능
-      { subject: '문제해결', A: Math.min(100, (memberStats.issues || 0) * 4 + 50), fullMark: 100 },
+      { subject: '구현력', A: Math.min(100, Math.round(implementation)), fullMark: 100 },
+      { subject: '설계 능력', A: Math.min(100, Math.round(design)), fullMark: 100 },
+      { subject: '소통/리뷰', A: Math.min(100, Math.round(communication)), fullMark: 100 },
+      { subject: '문서화', A: Math.min(100, Math.round(documentation)), fullMark: 100 },
+      { subject: '문제해결', A: Math.min(100, Math.round(problemSolving)), fullMark: 100 },
     ];
   };
+
+  const maxStats = useMemo(() => {
+    const teamMembersToCompare = allMembers && allMembers.length > 0 ? allMembers : [realMember || {}];
+    return {
+      score: Math.max(...teamMembersToCompare.map(m => m.score || 0), 0),
+      commits: Math.max(...teamMembersToCompare.map(m => m.commits || 0), 0),
+      pullRequests: Math.max(...teamMembersToCompare.map(m => m.pullRequests || 0), 0),
+      reviews: Math.max(...teamMembersToCompare.map(m => m.reviews || 0), 0),
+      issues: Math.max(...teamMembersToCompare.map(m => m.issues || 0), 0),
+    };
+  }, [allMembers, realMember]);
 
   const baseMember = realMember || memberData[memberId] || memberData["1"];
   
@@ -494,7 +531,7 @@ const DetailPage = () => {
     skills: realMember ? null : baseMember.skills,
     engagement: realMember ? null : baseMember.engagement,
     
-    radarData: realMember ? generateRadarData(realMember) : baseMember.radarData,
+    radarData: realMember ? generateRadarData(realMember, allMembers) : baseMember.radarData,
     
     // 주로 다룬 파일 확장자 (탑 3) 추출
     topFiles: realMember ? (() => {
@@ -557,6 +594,8 @@ const DetailPage = () => {
               <p style={{ margin: 0, color: '#475569', lineHeight: '1.6', fontSize: '0.95rem' }}>{member.codeAnalysis} {member.analysis?.expertise}</p>
               <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
                 {member.analysisMetrics?.expertise?.map((m, i) => <span key={i} style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>{m}</span>)}
+            {!!realMember && (member.score || 0) > 0 && (member.score || 0) === maxStats.score && <span style={{ padding: '4px 10px', backgroundColor: '#fef9c3', color: '#854d0e', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #fde047' }}>점수 1위</span>}
+            {!!realMember && (member.commitsCount || 0) > 0 && (member.commitsCount || 0) === maxStats.commits && <span style={{ padding: '4px 10px', backgroundColor: '#dcfce7', color: '#166534', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #bbf7d0' }}>커밋 1위</span>}
                 {member.topFiles?.length > 0 && (
                   <span style={{ padding: '4px 10px', backgroundColor: '#eef2ff', color: '#4f46e5', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #c7d2fe' }}>주요 다룬 파일: {member.topFiles.join(', ')}</span>
                 )}
@@ -567,6 +606,8 @@ const DetailPage = () => {
               <p style={{ margin: 0, color: '#475569', lineHeight: '1.6', fontSize: '0.95rem' }}>{member.commitAnalysis} {member.analysis?.collaboration}</p>
               <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
                 {member.analysisMetrics?.collaboration?.map((m, i) => <span key={i} style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>{m}</span>)}
+            {!!realMember && (member.reviewsCount || 0) > 0 && (member.reviewsCount || 0) === maxStats.reviews && <span style={{ padding: '4px 10px', backgroundColor: '#e0f2fe', color: '#0369a1', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #bae6fd' }}>리뷰 1위</span>}
+            {!!realMember && (member.prCount || 0) > 0 && (member.prCount || 0) === maxStats.pullRequests && <span style={{ padding: '4px 10px', backgroundColor: '#eef2ff', color: '#4f46e5', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #c7d2fe' }}>PR 1위</span>}
               </div>
             </div>
             <div>
@@ -574,6 +615,7 @@ const DetailPage = () => {
               <p style={{ margin: 0, color: '#475569', lineHeight: '1.6', fontSize: '0.95rem' }}>{member.analysis?.habit}</p>
               <div style={{ display: 'flex', gap: '8px', marginTop: '10px', flexWrap: 'wrap' }}>
                 {member.analysisMetrics?.habit?.map((m, i) => <span key={i} style={{ padding: '4px 10px', backgroundColor: '#f1f5f9', color: '#475569', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '600', border: '1px solid #e2e8f0' }}>{m}</span>)}
+            {!!realMember && (member.issuesCount || 0) > 0 && (member.issuesCount || 0) === maxStats.issues && <span style={{ padding: '4px 10px', backgroundColor: '#fee2e2', color: '#b91c1c', borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700', border: '1px solid #fecaca' }}>이슈 처리 1위</span>}
               </div>
             </div>
           </div>

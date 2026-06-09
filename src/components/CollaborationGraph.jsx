@@ -166,6 +166,7 @@ const CollaborationGraph = ({ data }) => {
         nodeCanvasObject={nodeCanvasObject}
         nodeLabel={node => `${node.name}: 협업 점수 ${node.collaborationScore}점`}
         // 링크 설정
+        linkWidth={link => Math.max(1, (link.value || 1) * 1.5)}
         linkWidth={link => Math.max(1, Math.min(8, Math.sqrt(link.value || 1) * 1.5))}
         linkColor={() => 'rgba(100, 116, 139, 0.5)'}
         linkCurvature={link => link.curvature || 0}
