@@ -14,12 +14,8 @@ const MainPage = () => {
   const [isRepoModalOpen, setIsRepoModalOpen] = useState(false);
   const [isJiraLinked, setIsJiraLinked] = useState(false);
   const [workspaceGoals, setWorkspaceGoals] = useState(() => {
-    try {
-      const saved = localStorage.getItem('workspaceGoals');
-      return saved ? JSON.parse(saved) : {};
-    } catch (error) {
-      return {};
-    }
+    const saved = localStorage.getItem('workspaceGoals');
+    return saved ? JSON.parse(saved) : {};
   });
   const [isEditingGoal, setIsEditingGoal] = useState(false);
   const [tempGoal, setTempGoal] = useState('');
@@ -45,8 +41,8 @@ const MainPage = () => {
   // 분석 기록(history)에 로컬 스토리지에 캐시된 세부 통계(스냅샷) 데이터를 덧붙여 반환
   const historyWithStats = useMemo(() => {
     return history.map(h => {
-      let stats = null;
-      if (h.id) {
+      let stats = h.stats || null;
+      if (!stats && h.id) {
         const snap = localStorage.getItem(`snapshot_${h.id}`);
         if (snap) {
           try {
@@ -164,7 +160,13 @@ const MainPage = () => {
   // 데이터 로드 시 기본 오너 선택
   useEffect(() => {
     if (activeTab === 'my' && !selectedOwner && Object.keys(myProjects).length > 0) {
-      setSelectedOwner(Object.keys(myProjects)[0]);
+      const myGithubId = localStorage.getItem("github_id");
+      // 본인의 깃허브 아이디와 일치하는 조직이 있다면 그것을 최우선으로 선택 (목표가 안 보이는 착시 방지)
+      if (myGithubId && myProjects[myGithubId]) {
+        setSelectedOwner(myGithubId);
+      } else {
+        setSelectedOwner(Object.keys(myProjects)[0]);
+      }
     }
   }, [myProjects, activeTab, selectedOwner]);
 

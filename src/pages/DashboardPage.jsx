@@ -163,14 +163,46 @@ const DashboardPage = () => {
 
         // 2. 새로 불러온 데이터를 스냅샷으로 저장하여, 다음 번에 들어올 때는 고정되도록 처리
         if (historyId) {
+          // MainPage의 미리보기를 위해 analysisHistory에 가벼운 통계 요약(stats)을 영구 기록
           try {
-            localStorage.setItem(`snapshot_${historyId}`, JSON.stringify({
-              dashboardData: mappedData,
-              timelineData: finalTimelineData
-            }));
+            const historyCache = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
+            const hIdx = historyCache.findIndex(h => h.id === historyId);
+            if (hIdx !== -1) {
+              historyCache[hIdx].stats = {
+                members: mappedData.length,
+                commits: mappedData.reduce((acc, m) => acc + (m.commits || 0), 0)
+              };
+              localStorage.setItem('analysisHistory', JSON.stringify(historyCache));
+            }
           } catch (e) {
-            console.warn('로컬 스토리지 용량 제한으로 스냅샷 캐시를 저장하지 못했습니다.');
+            console.warn('분석 기록 통계 업데이트 실패', e);
           }
+
+          const snapshotData = JSON.stringify({
+            dashboardData: mappedData,
+            timelineData: finalTimelineData
+          });
+
+          const saveSnapshot = () => {
+            try {
+              localStorage.setItem(`snapshot_${historyId}`, snapshotData);
+            } catch (e) {
+              // 용량 초과 에러 발생 시, 가장 오래된 스냅샷부터 하나씩 삭제하여 공간 확보
+              const historyCache = JSON.parse(localStorage.getItem('analysisHistory') || '[]');
+              let deleted = false;
+              for (let i = historyCache.length - 1; i >= 0; i--) {
+                const oldId = historyCache[i].id;
+                if (oldId !== historyId && localStorage.getItem(`snapshot_${oldId}`)) {
+                  localStorage.removeItem(`snapshot_${oldId}`);
+                  deleted = true;
+                  break;
+                }
+              }
+              if (deleted) saveSnapshot(); // 지웠으면 재시도
+              else console.warn('로컬 스토리지 공간을 확보할 수 없어 스냅샷을 저장하지 못했습니다.');
+            }
+          };
+          saveSnapshot();
         }
       } catch (err) {
         console.error('API Fetch Error:', err);
@@ -187,8 +219,8 @@ const DashboardPage = () => {
     setSelectedForCompare(prev => {
       const isSelected = prev.some(m => m.id === member.id);
       if (isSelected) return prev.filter(m => m.id !== member.id);
-      if (prev.length >= 5) {
-        alert('비교 모드는 최대 5명까지만 선택할 수 있습니다.');
+      if (prev.length >= 6) {
+        alert('비교 모드는 최대 6명까지만 선택할 수 있습니다.');
         return prev;
       }
       return [...prev, member];

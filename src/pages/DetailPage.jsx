@@ -478,6 +478,71 @@ const DetailPage = () => {
 
   const baseMember = realMember || memberData[memberId] || memberData["1"];
   
+  const topFilesDynamic = realMember ? (() => {
+    const files = realMember.changedFiles || [];
+    if (!files.length) return [];
+    const counts = {};
+    files.forEach(f => {
+      const ext = f.includes('.') ? f.split('.').pop() : f.split('/').pop();
+      const name = f.includes('.') ? `*.${ext}` : ext;
+      counts[name] = (counts[name] || 0) + 1;
+    });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0]);
+  })() : ["*.js", "*.jsx", "*.css"];
+
+  const dynamicAnalysis = realMember ? (() => {
+    const p = getMemberPersona(realMember).label;
+    const fileStr = topFilesDynamic.length > 0 ? `${topFilesDynamic[0]} 파일` : '주요 소스코드';
+    
+    const commits = realMember.commits || 0;
+    const prs = realMember.pullRequests || 0;
+    const reviews = realMember.reviews || 0;
+    const issues = realMember.issues || 0;
+
+    // 팀 내 상대 평가 기준 계산
+    const teamMembersToCompare = allMembers && allMembers.length > 0 ? allMembers : [realMember || {}];
+    const maxCommits = Math.max(...teamMembersToCompare.map(m => m.commits || 0), 1);
+    const maxPRs = Math.max(...teamMembersToCompare.map(m => m.pullRequests || 0), 1);
+    const maxReviews = Math.max(...teamMembersToCompare.map(m => m.reviews || 0), 1);
+    const maxIssues = Math.max(...teamMembersToCompare.map(m => m.issues || 0), 1);
+    const totalTeamCommits = teamMembersToCompare.reduce((sum, m) => sum + (m.commits || 0), 0);
+    const totalTeamPRs = teamMembersToCompare.reduce((sum, m) => sum + (m.pullRequests || 0), 0);
+
+    // 개인 내부 비율(Commit 유형) 계산
+    let featCount = 0, refactorCount = 0, fixCount = 0, otherCount = 0;
+    (realMember.rawCommits || []).forEach(c => {
+      const msg = (c.message || c.commit_summary || '').toLowerCase();
+      if (/^feat(\(.*?\))?:/.test(msg)) featCount++;
+      else if (/^refactor(\(.*?\))?:/.test(msg)) refactorCount++;
+      else if (/^fix(\(.*?\))?:/.test(msg)) fixCount++;
+      else otherCount++;
+    });
+    const maxTypeCount = Math.max(featCount, refactorCount, fixCount, otherCount);
+    const isFixDominant = fixCount > 0 && fixCount === maxTypeCount;
+
+    let expertise = `${fileStr}을 중심으로 맡은 바 기능 구현에 성실히 기여했습니다.`;
+    if (p === '핵심 아키텍트') expertise = `백엔드 정적 코드 분석에서 팀 내 최고 품질을 보여주며, ${fileStr}의 구조적 설계와 최적화에 크게 기여했습니다.`;
+    else if (refactorCount > featCount && refactorCount > 0) expertise = `팀 내 기여를 넘어, 본인의 전체 작업 중에서도 새로운 기능 구현보다 ${fileStr} 중심의 코드 구조 개선(리팩토링)에 더 많은 리소스를 쏟아붓는 장인 정신을 보여줍니다.`;
+    else if (commits >= maxCommits * 0.3) expertise = `단일 언어나 파일에 국한되지 않고 ${fileStr} 등 다양한 계층의 코드를 안정적으로 다루며 팀 프로젝트의 전반적인 완성도를 튼튼하게 높였습니다.`;
+
+    let collaboration = `총 ${prs + reviews}건의 PR과 리뷰를 통해 팀원들과 안정적으로 작업 내역을 공유하고 있습니다.`;
+    if (reviews >= prs * 2 && reviews > 0) collaboration = `본인의 기능을 개발하는 것보다 동료들의 코드를 검수하고 소통하는 데 2배 이상의 리소스를 할애하며, 팀의 기술 상향 평준화를 위해 이타적으로 헌신하고 있습니다.`;
+    else if (reviews >= maxReviews * 0.7 && reviews > 0) collaboration = `팀 내 최고 수준인 총 ${reviews}회의 리뷰를 동료들에게 남기며, 프로젝트 코드 품질 향상을 이끄는 중추적인 역할을 수행했습니다.`;
+    else if (reviews === 0 && prs === 0) collaboration = `현재 개인 브랜치 위주의 직접 커밋 비중이 높습니다. 향후 PR 생성 및 리뷰 참여를 조금씩 늘려간다면 팀 전체의 소통과 성장에 큰 도움이 될 것입니다.`;
+
+    let habit = `주어진 요구사항과 개발 마일스톤을 묵묵하고 안정적으로 수행하는 성향입니다.`;
+    if (isFixDominant) habit = `새로운 작업을 벌이기보다 본인이 맡은 파트의 안정성을 확보하고 버그를 완벽히 찾아내 정비하는 데 가장 많은 에너지를 집중하는 신중한 작업 습관을 가졌습니다.`;
+    else if (issues >= maxIssues * 0.6 && issues > 0) habit = `팀에서 가장 주도적으로 총 ${issues}건의 이슈 트래킹에 참여하며, 문제 상황을 능동적으로 발굴하는 독보적인 버그 헌터 성향을 가졌습니다.`;
+
+    return {
+      codeAnalysis: `${p} 성향의 개발 활동이 감지되었습니다.`,
+      commitAnalysis: "정량적 활동 지표와 참여 기록을 기반으로 분석된 협업 매너입니다.",
+      expertise,
+      collaboration,
+      habit
+    };
+  })() : null;
+
   // 실제 데이터 또는 Mock 데이터를 통합한 객체
   const member = {
     ...baseMember,
@@ -495,12 +560,12 @@ const DetailPage = () => {
     issuesCount: realMember ? realMember.issues : 0,
     
     // NLP 분석 텍스트 (추후 백엔드에서 제공할 키값을 우선 참조하고, 없으면 안내 문구 노출)
-    codeAnalysis: realMember ? (realMember.codeAnalysis || "AI 코드 분석이 수행되었습니다. 향후 백엔드에서 구체적인 요약 텍스트를 제공하면 이곳에 표시됩니다.") : baseMember.codeAnalysis,
-    commitAnalysis: realMember ? (realMember.commitAnalysis || "커밋 히스토리를 분석하여 협업 패턴을 도출합니다.") : baseMember.commitAnalysis,
+    codeAnalysis: realMember ? (realMember.codeAnalysis || dynamicAnalysis.codeAnalysis) : baseMember.codeAnalysis,
+    commitAnalysis: realMember ? (realMember.commitAnalysis || dynamicAnalysis.commitAnalysis) : baseMember.commitAnalysis,
     analysis: realMember ? {
-      expertise: realMember.analysis?.expertise || "주로 다룬 파일과 커밋 내용을 바탕으로 핵심 전문 분야를 파악합니다.",
-      collaboration: realMember.analysis?.collaboration || "PR과 리뷰 기록을 기반으로 한 협업 성향입니다.",
-      habit: realMember.analysis?.habit || "코드 변경 스타일과 커밋 주기를 나타냅니다."
+      expertise: realMember.analysis?.expertise || dynamicAnalysis.expertise,
+      collaboration: realMember.analysis?.collaboration || dynamicAnalysis.collaboration,
+      habit: realMember.analysis?.habit || dynamicAnalysis.habit
     } : baseMember.analysis,
     
     analysisMetrics: realMember ? {
@@ -534,17 +599,7 @@ const DetailPage = () => {
     radarData: realMember ? generateRadarData(realMember, allMembers) : baseMember.radarData,
     
     // 주로 다룬 파일 확장자 (탑 3) 추출
-    topFiles: realMember ? (() => {
-      const files = realMember.changedFiles || [];
-      if (!files.length) return [];
-      const counts = {};
-      files.forEach(f => {
-        const ext = f.includes('.') ? f.split('.').pop() : f.split('/').pop();
-        const name = f.includes('.') ? `*.${ext}` : ext;
-        counts[name] = (counts[name] || 0) + 1;
-      });
-      return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0]);
-    })() : ["*.js", "*.jsx", "*.css"],
+    topFiles: realMember ? topFilesDynamic : ["*.js", "*.jsx", "*.css"],
   };
 
   return (
