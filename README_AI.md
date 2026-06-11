@@ -61,6 +61,9 @@ pip install -r requirements.txt
 | `GEMINI_MODEL` | 아니오 | `gemini-2.5-flash` | Gemini 모델 이름 |
 | `GEMINI_PR_ISSUE_CHUNK` | 아니오 | `8` | PR/Issue 요약 배치 크기 |
 | `GEMINI_MAX_COMMITS_PER_USER` | 아니오 | `80` | 사용자당 Gemini에 넣을 최대 커밋 수 |
+| `COLLAB_FORMAT_MAX` | 아니오 | `20` | collab 형식 점수 상한 (0~20 단계형) |
+| `COLLAB_SIM_WEIGHT` | 아니오 | `0.8` | collab 앵커 유사도 가중 |
+| `COLLAB_PR_ISSUE_MIN_BODY_CHARS` | 아니오 | `200` | PR/Issue 본문 길이 단계 기준(자) |
 | `HF_TOKEN` | 아니오 | — | HuggingFace 토큰 (모델 다운로드 속도·할당량 개선) |
 
 Windows PowerShell 예시:
@@ -147,11 +150,59 @@ capstone2/
 | 항목 | 설명 |
 |------|------|
 | `quant_score` | 커밋, PR, 이슈, 리뷰, LOC 등 정량 지표 (팀 내 상대 평가) |
-| `collab_score` | BGE-M3 임베딩 + 루브릭 기반 협업 NLP 점수 |
+| `collab_score` | BGE-M3 임베딩 + 단계형 루브릭 기반 협업 NLP 점수 (아래 상세) |
 | `static_score` | `backend_code_score`만 사용. 코드 활동 없거나 점수 null이면 **0점** |
 | `final_score` | `0.2×quant + 0.6×collab + 0.2×static` (무활동 시 0) |
 
 POST body의 `qualitative_score`는 `collab_score`와 동일합니다.
+
+### collab_score 산출 (건별 → 채널 평균 → 가중 합)
+
+커밋·PR·이슈 텍스트 **1건**마다:
+
+```
+item_score = clip( format_score + anchor_similarity × 0.8 , 0, 100 )
+```
+
+- `anchor_similarity` (0~100): 양성 앵커(성의 있는 협업 서술)와의 코사인 유사도 평균에서 음성 앵커(단편 메시지) 유사도 평균을 뺀 뒤 0~100으로 정규화
+- `format_score` 상한: `COLLAB_FORMAT_MAX` (기본 **20**), 유사도 가중: `COLLAB_SIM_WEIGHT` (기본 **0.8**)
+
+**커밋 형식 점수 (0~20, 단계형)**
+
+| 점수 | 조건 |
+|------|------|
+| 20 | Conventional Commits 전체 (`feat:`, `fix:` 등 + scope + 본문) |
+| 14 | `#이슈번호 + 설명` 4자 이상 (예: `#188 로그인 버그 수정`) |
+| 12 | `[태그]` 접두 (예: `[HOTFIX] ...`) |
+| 10 | `feat`/`fix` 등 타입 접두만 (콜론 없이) |
+| 8 | 본문 24자 이상 |
+| 4 | 본문 10자 이상 |
+| 0 | `fix`/`wip`/`merge` 등 노이즈 단어 단독, 또는 너무 짧음 |
+
+**PR / Issue 형식 점수 (0~20, 단계형)**
+
+키워드: `architecture`, `refactor`, `설계`, `테스트` 등 EN/KO 장문 키워드 밀도
+
+| 점수 | 조건 |
+|------|------|
+| 20 | 키워드 3개 이상 |
+| 15 | 키워드 2개 |
+| 9 | 키워드 1개 |
+| 8 | 본문 `COLLAB_PR_ISSUE_MIN_BODY_CHARS`(기본 200)자 이상 |
+| 0 | 그 외 |
+
+채널 내 건별 점수는 평균 → 사용자 `collab_score`는 **고정 가중 합산**:
+
+```
+collab = 0.25×commit_avg + 0.45×pr_avg + 0.30×issue_avg
+```
+
+- 채널 텍스트가 없으면 **그 항은 0점** (재정규화 없음)
+- commit만 있으면 collab은 대략 `commit_avg × 0.25` 수준
+
+분석할 텍스트가 한 채널도 없으면 `collab_score = 0`.
+
+> 과거 **0/40 이진 형식 + sim×0.6** 방식은 제거되었습니다. `#이슈 설명`형 커밋도 단계형 형식 점수를 받을 수 있습니다. BGE 유사도가 팀 전체에 비슷하면 점수가 어느 정도 뭉칠 수 있습니다.
 
 ### Gemini 입력 범위 (요약용)
 
@@ -215,6 +266,7 @@ POST body는 로컬에서 `ai_analysis_payload.json`과 `ai_analysis_pr_issue_su
 - Gemini API **할당량·요금**에 유의하세요. 대규모 프로젝트는 사용자 수만큼 API 호출이 발생합니다.
 - `GEMINI_API_KEY`는 `.env`나 코드에 커밋하지 마세요.
 - Gemini 응답 JSON 파싱 실패 시 `(Gemini: 응답 JSON 파싱 실패)`로 기록될 수 있습니다. 재실행으로 일부 해결됩니다.
+- `collab_score`는 BGE 앵커 유사도에 의존합니다. 팀 전체 메시지 톤이 비슷하면 점수 분산이 제한될 수 있습니다.
 
 ## 문제 해결
 
