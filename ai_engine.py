@@ -60,6 +60,19 @@ RUBRIC_COMMIT = re.compile(
     r"^(feat|fix|refactor|docs|chore|test|style|perf|build|ci)(\([^)]+\))?!?:",
     re.I,
 )
+# collab 건별 점수 = 형식(0~FORMAT_MAX) + 앵커 유사도(0~100) × SIM_WEIGHT (합 최대 100)
+COLLAB_FORMAT_MAX = float(os.environ.get("COLLAB_FORMAT_MAX", "20"))
+COLLAB_SIM_WEIGHT = float(os.environ.get("COLLAB_SIM_WEIGHT", "0.8"))
+RUBRIC_COMMIT_ISSUE_REF = re.compile(r"^#\d+\s+.{4,}", re.I)
+RUBRIC_COMMIT_BRACKET_TAG = re.compile(r"^\[[^\]]{1,32}\]\s*.+", re.I)
+RUBRIC_COMMIT_PARTIAL = re.compile(
+    r"^(feat|fix|refactor|docs|chore|test|style|perf|build|ci)\b",
+    re.I,
+)
+RUBRIC_COMMIT_SHORT_NOISE = re.compile(
+    r"^(fix|wip|update|merge|test|tmp|asap|ok\.?|done\.?|ㅇㅇ|ㅇㅋ)$",
+    re.I,
+)
 LONG_KW_EN = [
     "architecture",
     "logic",
@@ -82,6 +95,60 @@ ANCHOR_NEG = [
     "수정 완료. 그냥 업데이트함.",
     "wip fix update asap",
 ]
+
+PR_ISSUE_MIN_BODY_CHARS = int(os.environ.get("COLLAB_PR_ISSUE_MIN_BODY_CHARS", "200"))
+
+
+def _keyword_density(text: str, lower_text: str) -> int:
+    density = sum(1 for word in LONG_KW_EN if word in lower_text)
+    density += sum(1 for word in LONG_KW_KO if word in text)
+    return density
+
+
+def commit_format_score(text: str) -> Tuple[float, List[str]]:
+    """커밋 형식 점수 0~COLLAB_FORMAT_MAX (단계형)."""
+    feedback: List[str] = []
+    t = str(text or "").strip()
+    if not t:
+        return 0.0, feedback
+    lower = t.lower()
+    if RUBRIC_COMMIT_SHORT_NOISE.match(t):
+        feedback.append("커밋 메시지가 너무 짧습니다. 변경 목적을 구체적으로 적어 주세요.")
+        return 0.0, feedback
+    if RUBRIC_COMMIT.match(lower):
+        return COLLAB_FORMAT_MAX, feedback
+    if RUBRIC_COMMIT_ISSUE_REF.match(t):
+        return 14.0, feedback
+    if RUBRIC_COMMIT_BRACKET_TAG.match(t):
+        return 12.0, feedback
+    if RUBRIC_COMMIT_PARTIAL.match(lower):
+        return 10.0, feedback
+    if len(t) >= 24:
+        return 8.0, feedback
+    if len(t) >= 10:
+        return 4.0, feedback
+    feedback.append("커밋 메시지에 변경 목적·이슈 번호를 더 구체적으로 적으면 좋습니다.")
+    return 0.0, feedback
+
+
+def pr_issue_format_score(text: str) -> Tuple[float, List[str]]:
+    """PR/Issue 형식 점수 0~COLLAB_FORMAT_MAX (키워드·본문 길이 단계형)."""
+    feedback: List[str] = []
+    t = str(text or "").strip()
+    if not t:
+        return 0.0, feedback
+    lower = t.lower()
+    density = _keyword_density(t, lower)
+    if density >= 3:
+        return COLLAB_FORMAT_MAX, feedback
+    if density == 2:
+        return 15.0, feedback
+    if density == 1:
+        return 9.0, feedback
+    if len(t) >= PR_ISSUE_MIN_BODY_CHARS:
+        return 8.0, feedback
+    feedback.append("PR/Issue 본문에 구현 이유·테스트·재현 방법 등을 더 구체적으로 남기면 좋습니다.")
+    return 0.0, feedback
 
 
 def rate_quant_column(series: pd.Series, min_n: int = MIN_N_RELATIVE) -> pd.Series:
@@ -203,20 +270,18 @@ def collab_text_for_thread(item: dict, *, max_comments: Optional[int] = None) ->
 
 
 def effective_collab_weights(commit_avg, pr_avg, issue_avg, weights):
+    """고정 채널 가중치(재정규화 없음). 데이터가 있는 채널 목록만 반환."""
     vals = {"commit": commit_avg, "pr": pr_avg, "issue": issue_avg}
     used = [key for key, value in vals.items() if value is not None]
-    denom = sum(weights[key] for key in used)
-    if denom <= 0:
-        return {key: 0.0 for key in weights}, used
-    return {key: (weights[key] / denom if key in used else 0.0) for key in weights}, used
+    return dict(weights), used
 
 
 def blend_collab_channels(commit_avg, pr_avg, issue_avg, weights, neutral=SCORE_NO_ACTIVITY):
-    eff_w, used = effective_collab_weights(commit_avg, pr_avg, issue_avg, weights)
-    if not used:
-        return float(neutral)
+    """채널별 평균을 고정 가중치(25/45/30)로 합산. 없는 채널은 0점 처리."""
     vals = {"commit": commit_avg, "pr": pr_avg, "issue": issue_avg}
-    return sum(float(vals[key]) * eff_w[key] for key in used)
+    if not any(value is not None for value in vals.values()):
+        return float(neutral)
+    return sum(float(vals[key]) * weights[key] for key in weights if vals[key] is not None)
 
 
 def weighted_final(df, cfg):
@@ -778,22 +843,14 @@ class CollaborationEvaluator:
     def eval_text(self, text, kind="commit"):
         score, feedback = 0.0, []
         text = str(text)
-        lower_text = text.lower()
 
         if kind == "commit":
-            if RUBRIC_COMMIT.match(lower_text.strip()):
-                score += 40
-            else:
-                feedback.append("커밋 컨벤션을 준수하세요.")
-            score += self._sim(text) * 0.6
+            fmt, fmt_fb = commit_format_score(text)
         else:
-            density = sum(1 for word in LONG_KW_EN if word in lower_text)
-            density += sum(1 for word in LONG_KW_KO if word in text)
-            if density >= 2:
-                score += 40
-            else:
-                feedback.append("PR/Issue 본문에 상세 설명을 추가하세요.")
-            score += self._sim(text) * 0.6
+            fmt, fmt_fb = pr_issue_format_score(text)
+        score += fmt
+        feedback.extend(fmt_fb)
+        score += self._sim(text) * COLLAB_SIM_WEIGHT
 
         return {"score": min(100.0, score), "feedback": feedback}
 
@@ -1149,8 +1206,10 @@ class GitHubInsightEngine:
             strengths.append("커밋 단위가 비교적 작게 나뉘어 변경 흐름을 따라가기 쉽습니다.")
 
         if missing_channels:
+            missing_weight = sum(COLLAB_CHANNEL_WEIGHTS[ch] for ch in missing_channels) * 100
             data_notes.append(
-                f"현재 {', '.join(missing_channels)} 데이터가 없어 협업 점수는 사용 가능한 채널({', '.join(used_channels) if used_channels else '없음'}) 기준으로 계산되었습니다."
+                f"{', '.join(missing_channels)} 채널 데이터가 없어 "
+                f"고정 가중치 중 {missing_weight:.0f}%는 협업 점수에 0점으로 반영되었습니다."
             )
 
         if float(row.get("static_score", 0) or 0) == SCORE_NO_ACTIVITY and (
